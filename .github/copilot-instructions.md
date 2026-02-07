@@ -4,11 +4,60 @@ This document provides context and guidelines for AI agents working on the `H5-c
 
 ---
 
-## 🚨 ABSOLUTE TOP PRIORITY — Three Inviolable Rules
+## 🚨 ABSOLUTE TOP PRIORITY — Four Inviolable Rules
 
-> **The following three rules have the HIGHEST execution priority. Regardless of change size, user instruction clarity, or time pressure, they MUST be strictly followed.**
+> **The following four rules have the HIGHEST execution priority. Regardless of change size, user instruction clarity, or time pressure, they MUST be strictly followed.**
 >
 > **⛔ Violating ANY of these → Immediately stop the current operation, revert all changes made, and restart from SOP Step 1. Excuses such as "the change is small", "user intent is clear", or "it's just one line" are NOT acceptable.**
+
+### Rule 0: MUST Chunk Long/Complex Tasks (Anti-Timeout — HIGHEST PRIORITY)
+
+> **⚠️ This rule exists to prevent catastrophic session termination caused by network timeouts during large operations. A single over-long tool call or response can crash the entire session, losing ALL progress. This has happened repeatedly and MUST be prevented at the architectural level.**
+
+**ANY task that involves modifying more than ~80 lines of code in a single tool call, or generating a response exceeding ~200 lines, MUST be decomposed into smaller atomic steps.**
+
+#### Mandatory Chunking Rules:
+
+1.  **Single Tool Call Size Limit:**
+    - Each `replace_string_in_file` or `create_file` call MUST NOT generate/replace more than **80 lines of code** at a time.
+    - If the target replacement is larger, split it into 2-4 sequential smaller replacements, each targeting a distinct section (e.g., CSS first, then HTML structure, then JS logic).
+    - **Absolutely forbidden:** Replacing an entire function body of 200+ lines in one call. Break it down.
+
+2.  **Multi-File Change Decomposition:**
+    - When modifying 4+ files, complete and validate files **one at a time** (or in small logical batches of 2-3 related files).
+    - After each batch, run `get_errors` to validate before proceeding.
+    - Do NOT attempt to modify all files in a single pass.
+
+3.  **Large HTML/Template String Handling (CRITICAL):**
+    - Inline HTML templates (e.g., `getStatsHtml()`, `getGuideHtml()`) that exceed 100 lines MUST be modified **section by section**:
+      - Step 1: CSS styles
+      - Step 2: HTML structure
+      - Step 3: JavaScript logic
+    - NEVER replace the entire template in one call. This is the #1 cause of timeout failures.
+
+4.  **Response Length Control:**
+    - Keep each assistant response concise. If the work involves many steps, execute them across multiple tool calls rather than generating a massive single response.
+    - Prefer showing **progress incrementally** (e.g., "✅ Step 1/5 done, proceeding to Step 2...") over batching everything into one giant output.
+
+5.  **Proactive Chunking Declaration:**
+    - Before starting any complex task, the AI MUST explicitly declare the chunking plan. Example:
+      > "This task involves ~300 lines of changes across 5 files. I'll split it into 6 steps:
+      > 1. Update types.ts (15 lines)
+      > 2. Update config.ts (10 lines)
+      > 3. Update HTML CSS section (60 lines)
+      > 4. Update HTML body section (50 lines)
+      > 5. Update JS logic section (70 lines)
+      > 6. Compile check + fix errors"
+    - This plan MUST be visible to the user before execution begins.
+
+6.  **Timeout Recovery Protocol:**
+    - If a previous session was terminated due to timeout, the AI MUST:
+      a. First scan all modified files to determine what was already completed.
+      b. Use `get_errors` to check current compilation status.
+      c. Resume from the exact point of interruption — do NOT restart from scratch.
+      d. Apply the chunking rules above to prevent the same timeout from recurring.
+
+> **⛔ Generating a single tool call or response that exceeds the size limits above = violation. "The change is logically one unit" is NOT an excuse — network infrastructure does not care about logical coherence, it cares about payload size.**
 
 ### Rule 1: MUST Use Sequential Thinking (corresponds to SOP §2)
 
@@ -54,10 +103,11 @@ This document provides context and guidelines for AI agents working on the `H5-c
 
 > **For every reply involving code modification, ALL items below MUST be completed before making any changes. Missing any item = modification NOT allowed.**
 
+- [ ] ✅ **Chunking plan declared** — If total changes exceed 80 lines, a step-by-step chunking plan has been explicitly stated (see Rule 0)
 - [ ] ✅ **sequential-thinking executed** — Logical deduction completed via the `sequential-thinking` tool, impact scope and potential risks analyzed
 - [ ] ✅ **Impact scope checked** — All directly/indirectly affected files identified, all consumers of shared types/interfaces checked
 - [ ] ✅ **Plan confirmed** — Implementation plan + Impact Analysis presented to user via `mcp_feedback_ask_user` dialog, user confirmation received
-- [ ] ✅ **Modification completed** — Code changes executed
+- [ ] ✅ **Modification completed** — Code changes executed (in chunks if applicable)
 - [ ] ✅ **Post-edit validation passed** — File integrity verified via `get_errors` tool (see §Post-Edit Validation below)
 - [ ] ✅ **Approval requested** — Explicit user approval requested via `mcp_feedback_ask_user` ("OK", "Approved", "Confirm", etc.)
 

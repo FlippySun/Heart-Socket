@@ -143,22 +143,26 @@ export enum ConnectionStatus {
 /** 数据源类型 */
 export type ProviderType = 'hds' | 'hyperate' | 'pulsoid' | 'custom';
 
-/** 心率区间（编程场景优化，在静息范围内细粒度划分） */
+/** 心率区间（编程场景优化，9 级细粒度划分） */
 export interface HeartRateZones {
-  /** 放松上限（默认 60） */
+  /** 深度放松上限（默认 58） */
+  deepRelax: number;
+  /** 放松上限（默认 65） */
   relax: number;
   /** 平静上限（默认 72） */
   calm: number;
-  /** 专注上限（默认 85） */
+  /** 轻度集中上限（默认 80） */
+  lightFocus: number;
+  /** 专注上限（默认 90） */
   focused: number;
-  /** 紧张上限（默认 100） */
+  /** 紧张上限（默认 105） */
   tense: number;
   /** 高压上限（超过此值为异常，默认 120） */
   stressed: number;
 }
 
-/** 心率区间名称 */
-export type HeartRateZoneName = 'low' | 'relax' | 'calm' | 'focused' | 'tense' | 'stressed' | 'extreme';
+/** 心率区间名称（9 级） */
+export type HeartRateZoneName = 'low' | 'deepRelax' | 'relax' | 'calm' | 'lightFocus' | 'focused' | 'tense' | 'stressed' | 'extreme';
 
 /** 插件配置 */
 export interface HeartSocketConfig {
@@ -183,6 +187,10 @@ export interface HeartSocketConfig {
   distanceJsonPath: string;
   /** 自定义数据源 — 速度字段 JSON 路径（留空不启用） */
   speedJsonPath: string;
+  /** 自定义数据源 — 体重字段 JSON 路径（留空不启用） */
+  bodyMassJsonPath: string;
+  /** 自定义数据源 — BMI 字段 JSON 路径（留空不启用） */
+  bmiJsonPath: string;
   statusBarPosition: 'left' | 'right';
   showHeartbeatAnimation: boolean;
   zones: HeartRateZones;
@@ -245,4 +253,30 @@ export interface HeartRateStats {
   samples: number;
   duration: number;
   history: HeartRateData[];
+}
+
+/** 每日心率摘要（持久化存储） */
+export interface DailySummary {
+  /** 日期 YYYY-MM-DD */
+  date: string;
+  /** 监测总时长 (ms) */
+  totalDuration: number;
+  /** 总采样数 */
+  samples: number;
+  /** 最低心率 */
+  min: number;
+  /** 最高心率 */
+  max: number;
+  /** 平均心率 */
+  avg: number;
+  /** BPM 累计和（用于增量计算平均值） */
+  bpmSum: number;
+  /** 各区间时间占比 (0-1) */
+  zoneDistribution: Record<string, number>;
+  /** 24 小时每小时平均心率（null 表示无数据） */
+  hourlyAvg: (number | null)[];
+  /** 每小时采样数（用于增量计算） */
+  hourlySamples: number[];
+  /** 每小时 BPM 累计和（用于增量计算） */
+  hourlyBpmSum: number[];
 }

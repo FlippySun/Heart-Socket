@@ -19,22 +19,26 @@ import type {
   MotionAnalysisResult,
 } from './types';
 
-/** 心率区间对应的颜色主题 */
+/** 心率区间对应的颜色主题（9 级） */
 const ZONE_COLORS: Record<HeartRateZoneName, vscode.ThemeColor> = {
   low: new vscode.ThemeColor('charts.blue'),
+  deepRelax: new vscode.ThemeColor('charts.blue'),
   relax: new vscode.ThemeColor('charts.blue'),
   calm: new vscode.ThemeColor('charts.green'),
+  lightFocus: new vscode.ThemeColor('charts.green'),
   focused: new vscode.ThemeColor('charts.purple'),
   tense: new vscode.ThemeColor('charts.yellow'),
   stressed: new vscode.ThemeColor('charts.orange'),
   extreme: new vscode.ThemeColor('charts.red'),
 };
 
-/** 心率区间对应的描述 */
+/** 心率区间对应的描述（9 级） */
 const ZONE_LABELS: Record<HeartRateZoneName, string> = {
   low: '⚠️ 偏低',
+  deepRelax: '😪 深度放松',
   relax: '😴 放松',
   calm: '😌 平静',
+  lightFocus: '🧘 轻度集中',
   focused: '🧠 专注',
   tense: '😰 紧张',
   stressed: '😤 高压',
@@ -390,8 +394,10 @@ export class StatusBarManager {
   private getZone(bpm: number): HeartRateZoneName {
     const zones = this.config.zones;
     if (bpm < this.config.alertLowBpm) { return 'low'; }
+    if (bpm < zones.deepRelax) { return 'deepRelax'; }
     if (bpm < zones.relax) { return 'relax'; }
     if (bpm < zones.calm) { return 'calm'; }
+    if (bpm < zones.lightFocus) { return 'lightFocus'; }
     if (bpm < zones.focused) { return 'focused'; }
     if (bpm < zones.tense) { return 'tense'; }
     if (bpm < zones.stressed) { return 'stressed'; }
@@ -435,9 +441,9 @@ export class StatusBarManager {
   }
 
   private showWaitingForDevice(): void {
-    this.statusBarItem.text = `$(watch) 等待设备连接...`;
-    this.statusBarItem.color = new vscode.ThemeColor('charts.blue');
-    this.statusBarItem.tooltip = 'Heart Socket - 服务已启动，等待 Apple Watch 连接...\n\n请在 Watch HDS App 中输入地址并点击 Start';
+    this.statusBarItem.text = `$(watch) 等待连接...`;
+    this.statusBarItem.color = new vscode.ThemeColor('charts.green');
+    this.statusBarItem.tooltip = 'Heart Socket - 服务已启动，等待设备连接...\n\n请确保设备与电脑在同一网络';
   }
 
   private showReconnecting(): void {

@@ -146,6 +146,16 @@
           "default": "",
           "markdownDescription": "自定义数据源中**速度**字段的 JSON 路径（如 `data.speed`）。留空表示不启用。仅 Custom WebSocket 模式有效。"
         },
+        "heartSocket.bodyMassJsonPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "自定义数据源中**体重 (kg)** 字段的 JSON 路径（如 `data.bodyMass`）。留空表示不启用。仅 Custom WebSocket 模式有效。"
+        },
+        "heartSocket.bmiJsonPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "自定义数据源中**BMI** 字段的 JSON 路径（如 `data.bmi`）。留空表示不启用。仅 Custom WebSocket 模式有效。"
+        },
         "heartSocket.statusBarPosition": {
           "type": "string",
           "enum": [
@@ -163,21 +173,31 @@
         "heartSocket.zones": {
           "type": "object",
           "default": {
-            "relax": 60,
+            "deepRelax": 58,
+            "relax": 65,
             "calm": 72,
-            "focused": 85,
-            "tense": 100,
+            "lightFocus": 80,
+            "focused": 90,
+            "tense": 105,
             "stressed": 120
           },
-          "markdownDescription": "心率区间阈值配置（BPM）— 针对编程场景优化，在静息范围内细粒度划分",
+          "markdownDescription": "心率区间阈值配置（BPM）— 针对编程场景优化的9级细粒度划分",
           "properties": {
+            "deepRelax": {
+              "type": "number",
+              "description": "深度放松上限（深度休息、冒想）"
+            },
             "relax": {
               "type": "number",
-              "description": "放松上限（低于此值为放松状态）"
+              "description": "放松上限（休息、随意浏览）"
             },
             "calm": {
               "type": "number",
               "description": "平静上限（阅读文档、Review 代码）"
+            },
+            "lightFocus": {
+              "type": "number",
+              "description": "轻度集中上限（简单编码、重构）"
             },
             "focused": {
               "type": "number",

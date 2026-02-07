@@ -6,12 +6,14 @@ import type { HeartSocketConfig, HeartRateZones, ProviderType } from './types';
 
 const CONFIG_SECTION = 'heartSocket';
 
-/** 默认心率区间（编程场景优化，在静息范围内细粒度划分） */
+/** 默认心率区间（编程场景优化，9 级细粒度划分） */
 const DEFAULT_ZONES: HeartRateZones = {
-  relax: 60,
+  deepRelax: 58,
+  relax: 65,
   calm: 72,
-  focused: 85,
-  tense: 100,
+  lightFocus: 80,
+  focused: 90,
+  tense: 105,
   stressed: 120,
 };
 
@@ -38,6 +40,8 @@ export function getConfig(): HeartSocketConfig {
     bloodOxygenJsonPath: config.get<string>('bloodOxygenJsonPath', ''),
     distanceJsonPath: config.get<string>('distanceJsonPath', ''),
     speedJsonPath: config.get<string>('speedJsonPath', ''),
+    bodyMassJsonPath: config.get<string>('bodyMassJsonPath', ''),
+    bmiJsonPath: config.get<string>('bmiJsonPath', ''),
     statusBarPosition: config.get<'left' | 'right'>('statusBarPosition', 'left'),
     showHeartbeatAnimation: config.get<boolean>('showHeartbeatAnimation', true),
     zones: config.get<HeartRateZones>('zones', DEFAULT_ZONES),

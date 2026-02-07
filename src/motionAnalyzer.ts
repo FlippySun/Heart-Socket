@@ -181,6 +181,17 @@ export class MotionAnalyzer extends EventEmitter {
   }
 
   /**
+   * 是否处于兼容模式（无 Motion 传感器数据）
+   *
+   * 当使用 Pulsoid/HypeRate/Custom Provider 时，
+   * 没有 Apple Watch Motion 传感器数据，
+   * 部分功能使用编辑器活动回退方案。
+   */
+  isCompatMode(): boolean {
+    return !this.hasMotionData;
+  }
+
+  /**
    * 销毁
    */
   dispose(): void {

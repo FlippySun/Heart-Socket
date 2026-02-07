@@ -159,6 +159,35 @@ export class HdsProvider extends EventEmitter {
       if (typeof bpm === 'number') {
         this.emitHeartRate(bpm);
       }
+
+      // ── 从 JSON 提取健康数据（calories, stepCount, bloodOxygen 等）──
+      const healthFields: Array<{ keys: string[]; type: HealthDataType }> = [
+        { keys: ['calories', 'cal'], type: 'calories' },
+        { keys: ['stepCount', 'steps', 'step_count'], type: 'stepCount' },
+        { keys: ['bloodOxygen', 'spo2', 'blood_oxygen', 'SpO2'], type: 'bloodOxygen' },
+        { keys: ['distance', 'dist'], type: 'distance' },
+        { keys: ['speed'], type: 'speed' },
+        { keys: ['bodyMass', 'body_mass', 'weight'], type: 'bodyMass' },
+        { keys: ['bmi', 'BMI'], type: 'bmi' },
+      ];
+      for (const field of healthFields) {
+        for (const key of field.keys) {
+          const val = json[key];
+          if (typeof val === 'number' && Number.isFinite(val)) {
+            this.emitHealthData(field.type, val);
+            break;
+          }
+        }
+      }
+
+      // ── 从 JSON 提取 Motion 数据（accelerometer, gravity 等）──
+      const motionObj = json.motion ?? json.Motion;
+      if (motionObj && typeof motionObj === 'object') {
+        const motion = this.buildMotionFromJson(motionObj as Record<string, unknown>);
+        if (motion) {
+          this.emit('motionData', motion);
+        }
+      }
     } catch {
       // 无法解析的消息，静默忽略
     }
@@ -207,7 +236,7 @@ export class HdsProvider extends EventEmitter {
     try {
       const trimmed = raw.trim();
 
-      // JSON 格式
+      // JSON 对象格式：{"accelerometer":{"x":...},...}
       if (trimmed.startsWith('{')) {
         const json = JSON.parse(trimmed);
         const motion = this.buildMotionFromJson(json);
@@ -217,14 +246,27 @@ export class HdsProvider extends EventEmitter {
         return;
       }
 
-      // CSV 格式：12 个数值（accel xyz, gravity xyz, rotation xyz, attitude rpy）
-      const parts = trimmed.split(',').map(Number);
+      // 数组或 CSV 格式 — 去除可能的 [ ] 括号
+      const cleaned = trimmed.replace(/^\[|\]$/g, '');
+      const parts = cleaned.split(',').map(s => Number(s.trim()));
+
       if (parts.length >= 12 && parts.every(Number.isFinite)) {
+        // 完整 12 值 CSV：accel xyz, gravity xyz, rotation xyz, attitude rpy
         const motion: MotionData = {
           accelerometer: { x: parts[0], y: parts[1], z: parts[2] },
           gravity: { x: parts[3], y: parts[4], z: parts[5] },
           rotationRate: { x: parts[6], y: parts[7], z: parts[8] },
           attitude: { roll: parts[9], pitch: parts[10], yaw: parts[11] },
+          timestamp: Date.now(),
+        };
+        this.emit('motionData', motion);
+      } else if (parts.length >= 3 && parts.slice(0, 3).every(Number.isFinite)) {
+        // 简化 3 值格式（仅加速度 XYZ），填充默认值
+        const motion: MotionData = {
+          accelerometer: { x: parts[0], y: parts[1], z: parts[2] },
+          gravity: { x: 0, y: 0, z: -1 },
+          rotationRate: { x: 0, y: 0, z: 0 },
+          attitude: { roll: 0, pitch: 0, yaw: 0 },
           timestamp: Date.now(),
         };
         this.emit('motionData', motion);

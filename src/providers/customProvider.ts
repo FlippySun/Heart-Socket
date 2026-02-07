@@ -24,7 +24,7 @@ import type { HealthDataType } from '../types';
 /** 健康数据字段映射定义 */
 interface HealthFieldMapping {
   /** 配置中的 JSON Path key */
-  configKey: 'caloriesJsonPath' | 'stepCountJsonPath' | 'bloodOxygenJsonPath' | 'distanceJsonPath' | 'speedJsonPath';
+  configKey: 'caloriesJsonPath' | 'stepCountJsonPath' | 'bloodOxygenJsonPath' | 'distanceJsonPath' | 'speedJsonPath' | 'bodyMassJsonPath' | 'bmiJsonPath';
   /** 对应的 HealthDataType */
   type: HealthDataType;
   /** 数值校验函数（可选） */
@@ -38,6 +38,8 @@ const HEALTH_FIELD_MAPPINGS: HealthFieldMapping[] = [
   { configKey: 'bloodOxygenJsonPath', type: 'bloodOxygen', validate: (v) => v >= 0 && v <= 100 },
   { configKey: 'distanceJsonPath', type: 'distance', validate: (v) => v >= 0 },
   { configKey: 'speedJsonPath', type: 'speed', validate: (v) => v >= 0 },
+  { configKey: 'bodyMassJsonPath', type: 'bodyMass', validate: (v) => v > 0 && v < 500 },
+  { configKey: 'bmiJsonPath', type: 'bmi', validate: (v) => v > 0 && v < 100 },
 ];
 
 export class CustomProvider extends BaseProvider {
