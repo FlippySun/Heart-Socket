@@ -64,6 +64,7 @@ export class MotionAnalyzer extends EventEmitter {
   private currentIntensity: CodingIntensityLevel = 'idle';
   private currentPosture: PostureState = 'typing';
   private flowState: FlowState = { active: false, duration: 0 };
+  private lastAnalysisResult: MotionAnalysisResult | null = null;
 
   // ── 计时器 ──
   private lastActiveTime: number = Date.now();
@@ -170,6 +171,13 @@ export class MotionAnalyzer extends EventEmitter {
     } else if (config.enableMotion && !this.analysisTimer) {
       this.startAnalysis();
     }
+  }
+
+  /**
+   * 获取最新的分析结果（供外部直接读取，不依赖事件）
+   */
+  getLatestResult(): MotionAnalysisResult | null {
+    return this.lastAnalysisResult;
   }
 
   /**
@@ -485,6 +493,7 @@ export class MotionAnalyzer extends EventEmitter {
       sedentaryDuration,
     };
 
+    this.lastAnalysisResult = result;
     this.emit('analysisResult', result);
   }
 

@@ -188,11 +188,35 @@ export class HeartRateManager {
     }
 
     // ── 已连接 / 正在连接：使用 QuickPick（功能多） ──
+    const zoneLabels: Record<string, string> = {
+      low: '⚠️ 偏低',
+      relax: '😴 放松',
+      calm: '😌 平静',
+      focused: '🧠 专注',
+      tense: '😰 紧张',
+      stressed: '😤 高压',
+      extreme: '🚨 异常',
+    };
+    const currentZone = this.getHeartRateZone(this.stats.current);
+    const zoneLabel = zoneLabels[currentZone] ?? '';
+
     const items: vscode.QuickPickItem[] = [
       {
         label: '$(graph) 查看心率统计',
-        description: this.stats.samples > 0 ? `当前 ${this.stats.current} BPM` : '暂无数据',
+        description: this.stats.samples > 0
+          ? `当前 ${this.stats.current} BPM ${zoneLabel ? `· ${zoneLabel}` : ''}`
+          : '暂无数据',
       },
+      { label: '', kind: vscode.QuickPickItemKind.Separator },
+      {
+        label: '$(gear) 打开设置',
+        description: 'Heart Socket 配置项',
+      },
+      {
+        label: '$(output) 查看输出日志',
+        description: '调试与连接日志',
+      },
+      { label: '', kind: vscode.QuickPickItemKind.Separator },
       {
         label: '$(debug-disconnect) 断开连接',
         description: this.provider?.name ?? '',
@@ -213,6 +237,10 @@ export class HeartRateManager {
 
     if (selected.label.includes('查看心率统计')) {
       await this.showStats();
+    } else if (selected.label.includes('打开设置')) {
+      await vscode.commands.executeCommand('workbench.action.openSettings', 'heartSocket');
+    } else if (selected.label.includes('查看输出日志')) {
+      this.outputChannel.show();
     } else if (selected.label.includes('断开连接')) {
       this.disconnect();
     } else if (selected.label.includes('切换数据源')) {
@@ -512,24 +540,93 @@ export class HeartRateManager {
 
     // 单例模式：如果面板已存在，更新内容并显示
     if (this.statsPanel) {
-      this.statsPanel.webview.html = this.getStatsHtml();
+      this.pushStatsUpdate();
       this.statsPanel.reveal(vscode.ViewColumn.Beside);
       return;
     }
 
-    // 创建新面板
+    // 创建新面板（启用脚本以支持实时更新）
     this.statsPanel = vscode.window.createWebviewPanel(
       'heartSocketStats',
       '💓 Heart Socket Stats',
       vscode.ViewColumn.Beside,
-      { enableScripts: false }
+      { enableScripts: true, retainContextWhenHidden: true }
     );
 
     this.statsPanel.webview.html = this.getStatsHtml();
 
+    // 发送初始数据
+    this.pushStatsUpdate();
+
     // 监听面板关闭，清除引用
     this.statsPanel.onDidDispose(() => {
       this.statsPanel = null;
+    });
+  }
+
+  /**
+   * 推送实时数据到 Stats 面板
+   * 事件驱动：由 onHeartRate() 和 analysisResult 事件触发，无额外定时器
+   */
+  private pushStatsUpdate(): void {
+    if (!this.statsPanel) { return; }
+
+    // 取最后 120 个数据点用于趋势图
+    const historySlice = this.stats.history.slice(-120);
+    const chartData = historySlice.map(h => h.bpm);
+
+    // 获取最新 Motion 分析结果
+    const motionResult = this.motionAnalyzer.getLatestResult();
+
+    // 心率区间信息
+    const zoneLabels: Record<string, string> = {
+      low: '⚠️ 偏低', relax: '😴 放松', calm: '😌 平静',
+      focused: '🧠 专注', tense: '😰 紧张', stressed: '😤 高压', extreme: '🚨 异常',
+    };
+    const zoneColors: Record<string, string> = {
+      low: '#5b9bd5', relax: '#5b9bd5', calm: '#4caf50',
+      focused: '#9c27b0', tense: '#ff9800', stressed: '#ff5722', extreme: '#f44336',
+    };
+    const currentZone = this.getHeartRateZone(this.stats.current);
+
+    this.statsPanel.webview.postMessage({
+      type: 'statsUpdate',
+      data: {
+        // 心率基础数据
+        current: this.stats.current,
+        min: this.stats.min,
+        max: this.stats.max,
+        avg: this.stats.avg,
+        samples: this.stats.samples,
+        duration: this.stats.duration,
+        durationStr: this.formatDuration(this.stats.duration),
+
+        // 心率区间
+        zone: currentZone,
+        zoneLabel: zoneLabels[currentZone] ?? '未知',
+        zoneColor: zoneColors[currentZone] ?? '#888',
+
+        // 趋势图数据
+        chartData,
+
+        // Motion 分析
+        motion: motionResult ? {
+          codingIntensity: motionResult.codingIntensity,
+          posture: motionResult.posture,
+          flowState: motionResult.flowState,
+          slackingIndex: motionResult.slackingIndex,
+          energyLevel: motionResult.energyLevel,
+          sedentaryDuration: motionResult.sedentaryDuration,
+          raisedDuration: motionResult.raisedDuration,
+        } : null,
+
+        // 健康数据
+        healthSnapshot: this.healthSnapshot,
+
+        // 连接信息
+        providerName: this.provider?.name ?? '未连接',
+        providerType: this.config.provider,
+      },
     });
   }
 
@@ -628,6 +725,8 @@ export class HeartRateManager {
 
     this.motionAnalyzer.on('analysisResult', (result: MotionAnalysisResult) => {
       this.statusBar.updateMotionAnalysis(result);
+      // 推送到 Stats 面板（Motion 分析结果更新时也刷新）
+      this.pushStatsUpdate();
     });
 
     this.motionAnalyzer.on('sedentaryAlert', (data: { duration: number; highHeartRate: boolean }) => {
@@ -681,11 +780,21 @@ export class HeartRateManager {
     // 更新状态栏（传递健康数据快照）
     this.statusBar.updateHeartRate(data, this.healthSnapshot);
 
+    // 更新状态栏心率统计摘要
+    this.statusBar.updateHeartRateStats({
+      min: this.stats.min,
+      max: this.stats.max,
+      avg: this.stats.avg,
+    });
+
     // 检查告警
     this.alertManager.check(data);
 
     // 转发到 Motion Analyzer（辅助心流检测）
     this.motionAnalyzer.feedHeartRate(data.bpm);
+
+    // 推送到 Stats 面板（实时更新）
+    this.pushStatsUpdate();
 
     // 日志
     this.log(`❤️ ${data.bpm} BPM (${data.source})`);
@@ -909,6 +1018,20 @@ export class HeartRateManager {
       custom: '自定义 WebSocket',
     };
     return labels[type] ?? type;
+  }
+
+  /**
+   * 获取心率区间名称
+   */
+  private getHeartRateZone(bpm: number): string {
+    const zones = this.config.zones;
+    if (bpm < this.config.alertLowBpm) { return 'low'; }
+    if (bpm < zones.relax) { return 'relax'; }
+    if (bpm < zones.calm) { return 'calm'; }
+    if (bpm < zones.focused) { return 'focused'; }
+    if (bpm < zones.tense) { return 'tense'; }
+    if (bpm < zones.stressed) { return 'stressed'; }
+    return 'extreme';
   }
 
   /**
@@ -1237,58 +1360,10 @@ export class HeartRateManager {
   }
 
   /**
-   * 生成统计页面 HTML
+   * 生成统计页面 HTML（实时仪表盘）
+   * 初始渲染骨架 + JS 通过 postMessage 接收实时数据
    */
   private getStatsHtml(): string {
-    const { current, min, max, avg, samples, duration } = this.stats;
-    const durationStr = this.formatDuration(duration);
-    const minDisplay = min === Infinity ? '--' : min;
-    const maxDisplay = max === -Infinity ? '--' : max;
-
-    // 构建健康数据卡片
-    const healthCards: string[] = [];
-    if (this.healthSnapshot.calories !== undefined) {
-      healthCards.push(`
-    <div class="stat-card">
-      <div class="value">${this.healthSnapshot.calories}</div>
-      <div class="label">🔥 卡路里 (kcal)</div>
-    </div>`);
-    }
-    if (this.healthSnapshot.stepCount !== undefined) {
-      healthCards.push(`
-    <div class="stat-card">
-      <div class="value">${this.healthSnapshot.stepCount}</div>
-      <div class="label">👟 步数</div>
-    </div>`);
-    }
-    if (this.healthSnapshot.bloodOxygen !== undefined) {
-      healthCards.push(`
-    <div class="stat-card">
-      <div class="value">${this.healthSnapshot.bloodOxygen}%</div>
-      <div class="label">🩸 血氧</div>
-    </div>`);
-    }
-    if (this.healthSnapshot.distance !== undefined) {
-      healthCards.push(`
-    <div class="stat-card">
-      <div class="value">${this.healthSnapshot.distance.toFixed(2)}</div>
-      <div class="label">📏 距离 (km)</div>
-    </div>`);
-    }
-    if (this.healthSnapshot.speed !== undefined) {
-      healthCards.push(`
-    <div class="stat-card">
-      <div class="value">${this.healthSnapshot.speed.toFixed(1)}</div>
-      <div class="label">⚡ 速度 (km/h)</div>
-    </div>`);
-    }
-
-    const healthSection = healthCards.length > 0
-      ? `<h2 style="text-align:center;margin-top:32px;margin-bottom:16px;opacity:0.7;">📊 健康数据</h2>
-  <div class="stats-grid">${healthCards.join('')}
-  </div>`
-      : '';
-
     return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -1296,95 +1371,432 @@ export class HeartRateManager {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Heart Socket Stats</title>
   <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
       padding: 24px;
       color: var(--vscode-foreground);
       background: var(--vscode-editor-background);
+      max-width: 720px;
+      margin: 0 auto;
     }
+
+    /* ── 头部：实时心率 ── */
     .header {
       text-align: center;
-      margin-bottom: 32px;
+      margin-bottom: 24px;
     }
-    .header h1 {
-      font-size: 28px;
-      margin: 0;
-    }
-    .header .bpm {
-      font-size: 64px;
+    .header h1 { font-size: 24px; margin-bottom: 8px; }
+    .bpm-display {
+      font-size: 72px;
       font-weight: bold;
-      color: var(--vscode-charts-red, #e74c3c);
-      margin: 16px 0;
+      line-height: 1;
+      transition: color 0.3s;
     }
-    .header .bpm-label {
-      font-size: 18px;
+    .zone-badge {
+      display: inline-block;
+      margin-top: 8px;
+      padding: 4px 16px;
+      border-radius: 20px;
+      font-size: 14px;
+      font-weight: 500;
+      transition: background-color 0.3s;
+    }
+
+    /* ── 趋势图 ── */
+    .chart-section {
+      margin: 20px 0;
+      border: 1px solid var(--vscode-editorWidget-border);
+      border-radius: 12px;
+      padding: 16px;
+      background: var(--vscode-editorWidget-background);
+    }
+    .chart-section h3 {
+      font-size: 13px;
       opacity: 0.7;
+      margin-bottom: 8px;
+    }
+    .chart-container {
+      width: 100%;
+      height: 120px;
+      position: relative;
+    }
+    .chart-container svg {
+      width: 100%;
+      height: 100%;
+    }
+    .chart-labels {
+      display: flex;
+      justify-content: space-between;
+      font-size: 11px;
+      opacity: 0.5;
+      margin-top: 4px;
+    }
+
+    /* ── 统计网格 ── */
+    .section-title {
+      font-size: 14px;
+      font-weight: 600;
+      margin: 24px 0 12px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--vscode-editorWidget-border);
+      opacity: 0.8;
     }
     .stats-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-      gap: 16px;
-      max-width: 600px;
-      margin: 0 auto;
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      gap: 10px;
     }
     .stat-card {
       background: var(--vscode-editorWidget-background);
       border: 1px solid var(--vscode-editorWidget-border);
       border-radius: 8px;
-      padding: 16px;
+      padding: 14px;
       text-align: center;
     }
     .stat-card .value {
-      font-size: 32px;
+      font-size: 26px;
       font-weight: bold;
-      color: var(--vscode-foreground);
     }
     .stat-card .label {
-      font-size: 12px;
+      font-size: 11px;
       opacity: 0.6;
       margin-top: 4px;
-      text-transform: uppercase;
     }
-    .footer {
-      text-align: center;
-      margin-top: 32px;
+    .stat-card.highlight {
+      border-color: var(--vscode-charts-purple, #9c27b0);
+      border-width: 2px;
+    }
+
+    /* ── Motion 分析区 ── */
+    .motion-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 10px;
+    }
+    .motion-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-radius: 8px;
+      background: var(--vscode-editorWidget-background);
+      border: 1px solid var(--vscode-editorWidget-border);
+    }
+    .motion-item .icon { font-size: 20px; flex-shrink: 0; }
+    .motion-item .info { flex: 1; }
+    .motion-item .info .name {
+      font-size: 12px;
+      opacity: 0.6;
+    }
+    .motion-item .info .val {
+      font-size: 16px;
+      font-weight: 600;
+    }
+
+    /* ── 进度条 ── */
+    .progress-bar {
+      width: 100%;
+      height: 6px;
+      border-radius: 3px;
+      background: var(--vscode-editorWidget-border);
+      margin-top: 4px;
+      overflow: hidden;
+    }
+    .progress-bar .fill {
+      height: 100%;
+      border-radius: 3px;
+      transition: width 0.5s ease;
+    }
+
+    /* ── 健康数据 ── */
+    .health-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 10px;
+    }
+
+    /* ── 连接信息 ── */
+    .connection-info {
+      display: flex;
+      justify-content: center;
+      gap: 24px;
+      margin-top: 24px;
       font-size: 12px;
       opacity: 0.5;
     }
+
+    /* ── 无数据占位 ── */
+    .no-data {
+      text-align: center;
+      padding: 20px;
+      opacity: 0.5;
+      font-size: 13px;
+    }
+    .hidden { display: none !important; }
   </style>
 </head>
 <body>
+  <!-- 头部：实时心率 -->
   <div class="header">
     <h1>💓 Heart Socket</h1>
-    <div class="bpm">${current}</div>
-    <div class="bpm-label">当前心率 (BPM)</div>
+    <div class="bpm-display" id="currentBpm">--</div>
+    <div class="zone-badge" id="zoneBadge">等待数据...</div>
   </div>
+
+  <!-- 趋势图 -->
+  <div class="chart-section">
+    <h3>📈 心率趋势（最近 120 秒）</h3>
+    <div class="chart-container">
+      <svg id="chartSvg" viewBox="0 0 600 120" preserveAspectRatio="none">
+        <defs>
+          <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="var(--vscode-charts-red, #e74c3c)" stop-opacity="0.3"/>
+            <stop offset="100%" stop-color="var(--vscode-charts-red, #e74c3c)" stop-opacity="0.02"/>
+          </linearGradient>
+        </defs>
+        <polygon id="chartArea" fill="url(#areaGrad)" points="0,120 600,120"/>
+        <polyline id="chartLine" fill="none" stroke="var(--vscode-charts-red, #e74c3c)" stroke-width="2" stroke-linejoin="round" points=""/>
+      </svg>
+    </div>
+    <div class="chart-labels">
+      <span id="chartMin">--</span>
+      <span id="chartMax">--</span>
+    </div>
+  </div>
+
+  <!-- 心率统计 -->
+  <div class="section-title">📊 心率统计</div>
   <div class="stats-grid">
     <div class="stat-card">
-      <div class="value">${minDisplay}</div>
-      <div class="label">最低心率</div>
+      <div class="value" id="minBpm">--</div>
+      <div class="label">📉 最低心率</div>
     </div>
     <div class="stat-card">
-      <div class="value">${maxDisplay}</div>
-      <div class="label">最高心率</div>
+      <div class="value" id="maxBpm">--</div>
+      <div class="label">📈 最高心率</div>
     </div>
     <div class="stat-card">
-      <div class="value">${avg}</div>
-      <div class="label">平均心率</div>
+      <div class="value" id="avgBpm">--</div>
+      <div class="label">📊 平均心率</div>
     </div>
     <div class="stat-card">
-      <div class="value">${samples}</div>
-      <div class="label">采样次数</div>
+      <div class="value" id="sampleCount">0</div>
+      <div class="label">🔢 采样次数</div>
     </div>
     <div class="stat-card">
-      <div class="value">${durationStr}</div>
-      <div class="label">监测时长</div>
+      <div class="value" id="durationVal">0s</div>
+      <div class="label">⏱️ 监测时长</div>
     </div>
   </div>
-  ${healthSection}
-  <div class="footer">
-    Heart Socket - Apple Watch Heart Rate Monitor for VS Code
+
+  <!-- Motion 分析 -->
+  <div id="motionSection" class="hidden">
+    <div class="section-title">🧠 Motion 分析</div>
+    <div class="motion-grid">
+      <div class="motion-item">
+        <span class="icon" id="intensityIcon">💤</span>
+        <div class="info">
+          <div class="name">打字强度</div>
+          <div class="val" id="intensityVal">空闲</div>
+        </div>
+      </div>
+      <div class="motion-item">
+        <span class="icon" id="postureIcon">⌨️</span>
+        <div class="info">
+          <div class="name">姿态</div>
+          <div class="val" id="postureVal">打字中</div>
+        </div>
+      </div>
+      <div class="motion-item">
+        <span class="icon">🎯</span>
+        <div class="info">
+          <div class="name">心流状态</div>
+          <div class="val" id="flowVal">未激活</div>
+        </div>
+      </div>
+      <div class="motion-item">
+        <span class="icon" id="slackingIcon">🌟</span>
+        <div class="info">
+          <div class="name">摸鱼指数</div>
+          <div class="val" id="slackingVal">0/100</div>
+          <div class="progress-bar"><div class="fill" id="slackingBar" style="width:0%;background:var(--vscode-charts-green,#4caf50)"></div></div>
+        </div>
+      </div>
+      <div class="motion-item">
+        <span class="icon">🔋</span>
+        <div class="info">
+          <div class="name">精力水平</div>
+          <div class="val" id="energyVal">50%</div>
+          <div class="progress-bar"><div class="fill" id="energyBar" style="width:50%;background:var(--vscode-charts-blue,#2196f3)"></div></div>
+        </div>
+      </div>
+      <div class="motion-item">
+        <span class="icon" id="sedentaryIcon">🪑</span>
+        <div class="info">
+          <div class="name">久坐时长</div>
+          <div class="val" id="sedentaryVal">0 分钟</div>
+        </div>
+      </div>
+    </div>
   </div>
+
+  <!-- 健康数据 -->
+  <div id="healthSection" class="hidden">
+    <div class="section-title">💊 健康数据</div>
+    <div class="health-grid" id="healthGrid"></div>
+  </div>
+
+  <!-- 连接信息 -->
+  <div class="connection-info">
+    <span>📡 <span id="providerName">--</span></span>
+    <span>⏱️ <span id="connDuration">--</span></span>
+    <span>🔢 <span id="connSamples">0</span> 次采样</span>
+  </div>
+
+  <script>
+    const vscode = acquireVsCodeApi();
+
+    // DOM 缓存
+    const $ = (id) => document.getElementById(id);
+
+    // 强度映射
+    const intensityMap = {
+      idle:     { icon: '💤', label: '空闲' },
+      light:    { icon: '⌨️', label: '轻度打字' },
+      moderate: { icon: '⚡', label: '中等打字' },
+      intense:  { icon: '🔥', label: '密集打字' },
+      furious:  { icon: '🚀', label: '疯狂打字' },
+    };
+    const postureMap = {
+      typing:   { icon: '⌨️', label: '打字中' },
+      raised:   { icon: '🖐️', label: '抬手' },
+      slacking: { icon: '🤔', label: '摸鱼' },
+    };
+
+    // 更新趋势图
+    function updateChart(data) {
+      if (!data || data.length === 0) return;
+
+      const svgW = 600, svgH = 120;
+      const pad = 4;
+      const minBpm = Math.max(40, Math.min(...data) - 5);
+      const maxBpm = Math.max(minBpm + 10, Math.max(...data) + 5);
+
+      const points = data.map((v, i) => {
+        const x = (i / Math.max(1, data.length - 1)) * svgW;
+        const y = pad + (1 - (v - minBpm) / (maxBpm - minBpm)) * (svgH - pad * 2);
+        return x.toFixed(1) + ',' + y.toFixed(1);
+      }).join(' ');
+
+      $('chartLine').setAttribute('points', points);
+
+      // 面积填充
+      const areaPoints = '0,' + svgH + ' ' + points + ' ' + svgW + ',' + svgH;
+      $('chartArea').setAttribute('points', areaPoints);
+
+      $('chartMin').textContent = minBpm + ' BPM';
+      $('chartMax').textContent = maxBpm + ' BPM';
+    }
+
+    // 更新健康数据
+    function updateHealth(snapshot) {
+      const grid = $('healthGrid');
+      const section = $('healthSection');
+      if (!snapshot) { section.classList.add('hidden'); return; }
+
+      const items = [];
+      if (snapshot.calories !== undefined)    items.push({ icon: '🔥', label: '卡路里', value: snapshot.calories + ' kcal' });
+      if (snapshot.stepCount !== undefined)   items.push({ icon: '👟', label: '步数',    value: snapshot.stepCount });
+      if (snapshot.bloodOxygen !== undefined) items.push({ icon: '🩸', label: '血氧',    value: snapshot.bloodOxygen + '%' });
+      if (snapshot.distance !== undefined)    items.push({ icon: '📏', label: '距离',    value: snapshot.distance.toFixed(2) + ' km' });
+      if (snapshot.speed !== undefined)       items.push({ icon: '⚡', label: '速度',    value: snapshot.speed.toFixed(1) + ' km/h' });
+
+      if (items.length === 0) { section.classList.add('hidden'); return; }
+
+      section.classList.remove('hidden');
+      grid.innerHTML = items.map(it =>
+        '<div class="stat-card"><div class="value">' + it.value + '</div><div class="label">' + it.icon + ' ' + it.label + '</div></div>'
+      ).join('');
+    }
+
+    // 主更新函数
+    function onUpdate(d) {
+      // 心率
+      $('currentBpm').textContent = d.current || '--';
+      $('currentBpm').style.color = d.zoneColor || 'var(--vscode-charts-red, #e74c3c)';
+      $('zoneBadge').textContent = d.zoneLabel || '--';
+      $('zoneBadge').style.background = d.zoneColor || '#888';
+      $('zoneBadge').style.color = '#fff';
+
+      // 统计
+      $('minBpm').textContent = (d.min === Infinity || d.min === null) ? '--' : d.min;
+      $('maxBpm').textContent = (d.max === -Infinity || d.max === null) ? '--' : d.max;
+      $('avgBpm').textContent = d.avg || '--';
+      $('sampleCount').textContent = d.samples || 0;
+      $('durationVal').textContent = d.durationStr || '0s';
+
+      // 趋势图
+      updateChart(d.chartData);
+
+      // Motion 分析
+      if (d.motion) {
+        $('motionSection').classList.remove('hidden');
+        const intensity = intensityMap[d.motion.codingIntensity] || intensityMap.idle;
+        $('intensityIcon').textContent = intensity.icon;
+        $('intensityVal').textContent = intensity.label;
+
+        const posture = postureMap[d.motion.posture] || postureMap.typing;
+        $('postureIcon').textContent = posture.icon;
+        $('postureVal').textContent = posture.label;
+
+        // 心流
+        if (d.motion.flowState && d.motion.flowState.active) {
+          const mins = Math.floor(d.motion.flowState.duration / 60000);
+          $('flowVal').textContent = '🟢 已持续 ' + mins + ' 分钟';
+        } else {
+          $('flowVal').textContent = '未激活';
+        }
+
+        // 摸鱼指数
+        const si = Math.round(d.motion.slackingIndex || 0);
+        $('slackingVal').textContent = si + '/100';
+        $('slackingBar').style.width = si + '%';
+        $('slackingBar').style.background = si < 30 ? 'var(--vscode-charts-green,#4caf50)' :
+          si < 50 ? 'var(--vscode-charts-blue,#2196f3)' :
+          si < 70 ? 'var(--vscode-charts-yellow,#ff9800)' : 'var(--vscode-charts-red,#f44336)';
+        $('slackingIcon').textContent = si < 30 ? '🌟' : si < 50 ? '👍' : si < 70 ? '🤔' : '🐟';
+
+        // 精力
+        const el = Math.round(d.motion.energyLevel || 50);
+        $('energyVal').textContent = el + '%';
+        $('energyBar').style.width = el + '%';
+
+        // 久坐
+        const sedMin = Math.floor((d.motion.sedentaryDuration || 0) / 60000);
+        $('sedentaryVal').textContent = sedMin + ' 分钟';
+        $('sedentaryIcon').textContent = sedMin >= 60 ? '🚨' : sedMin >= 30 ? '⚠️' : '🪑';
+      } else {
+        $('motionSection').classList.add('hidden');
+      }
+
+      // 健康数据
+      updateHealth(d.healthSnapshot);
+
+      // 连接信息
+      $('providerName').textContent = d.providerName || '--';
+      $('connDuration').textContent = d.durationStr || '--';
+      $('connSamples').textContent = d.samples || 0;
+    }
+
+    // 监听来自扩展的实时消息
+    window.addEventListener('message', (event) => {
+      const msg = event.data;
+      if (msg.type === 'statsUpdate' && msg.data) {
+        onUpdate(msg.data);
+      }
+    });
+  </script>
 </body>
 </html>`;
   }

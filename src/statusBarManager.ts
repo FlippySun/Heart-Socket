@@ -75,6 +75,9 @@ export class StatusBarManager {
   private codingIntensity: CodingIntensityLevel = 'idle';
   private motionAnalysis: MotionAnalysisResult | null = null;
 
+  // 心率统计摘要（用于 tooltip 显示）
+  private heartRateStats: { min: number; max: number; avg: number } | null = null;
+
   /** 节流：最小更新间隔 (ms) */
   private lastUpdateTime: number = 0;
   private readonly UPDATE_THROTTLE = 500;
@@ -179,6 +182,13 @@ export class StatusBarManager {
   }
 
   /**
+   * 更新心率统计摘要（用于 tooltip 显示 min/max/avg）
+   */
+  updateHeartRateStats(stats: { min: number; max: number; avg: number }): void {
+    this.heartRateStats = stats;
+  }
+
+  /**
    * 更新配置
    */
   updateConfig(config: HeartSocketConfig): void {
@@ -254,6 +264,14 @@ export class StatusBarManager {
       `📊 心率区间: ${zoneLabel}`,
     ];
 
+    // 添加心率统计摘要（min/max/avg）
+    if (this.heartRateStats) {
+      const { min, max, avg } = this.heartRateStats;
+      const minDisplay = min === Infinity ? '--' : min;
+      const maxDisplay = max === -Infinity ? '--' : max;
+      lines.push(`📉 最低/最高/平均: ${minDisplay} / ${maxDisplay} / ${avg} BPM`);
+    }
+
     // 添加敲代码强度
     if (this.config.showCodingIntensity) {
       const intensityIcon = CODING_INTENSITY_ICONS[this.codingIntensity];
@@ -289,14 +307,23 @@ export class StatusBarManager {
         `🔋 精力水平: ${Math.round(this.motionAnalysis.energyLevel)}%`
       );
 
-      // 姿态状态
-      const postureEmoji =
-        this.motionAnalysis.posture === 'typing'
-          ? '⌨️'
-          : this.motionAnalysis.posture === 'raised'
-            ? '🖐️'
-            : '🤔';
-      lines.push(`${postureEmoji} 姿态: ${this.motionAnalysis.posture}`);
+      // 姿态状态（中文翻译）
+      const postureMap: Record<string, { emoji: string; label: string }> = {
+        typing: { emoji: '⌨️', label: '打字中' },
+        raised: { emoji: '🖐️', label: '抬手' },
+        slacking: { emoji: '🤔', label: '摸鱼' },
+      };
+      const postureInfo = postureMap[this.motionAnalysis.posture] ?? { emoji: '❓', label: this.motionAnalysis.posture };
+      lines.push(`${postureInfo.emoji} 姿态: ${postureInfo.label}`);
+
+      // 久坐时长
+      if (this.motionAnalysis.sedentaryDuration > 0) {
+        const sedentaryMinutes = Math.floor(this.motionAnalysis.sedentaryDuration / 60000);
+        if (sedentaryMinutes > 0) {
+          const sedentaryEmoji = sedentaryMinutes >= 60 ? '🚨' : sedentaryMinutes >= 30 ? '⚠️' : '🪑';
+          lines.push(`${sedentaryEmoji} 久坐时长: ${sedentaryMinutes} 分钟`);
+        }
+      }
     }
 
     // 添加健康数据
