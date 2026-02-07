@@ -11,11 +11,11 @@
 - **实时心率显示** — 状态栏显示当前心率 BPM + 心跳动画
 - **多种健康数据** — 心率、卡路里、步数、血氧、距离、速度等一目了然
 - **心率区间变色** — 根据心率自动切换颜色（蓝/绿/黄/橙/红）
-- **多数据源支持** — HDS / HypeRate / Pulsoid / 自定义 WebSocket
+- **多数据源支持** — HDS Cloud / HDS 本地 / HypeRate / Pulsoid / 自定义 WebSocket
 - **智能告警** — 高心率/低心率弹窗提醒，可配置阈值和冷却时间
 - **自动重连** — 网络断开后指数退避自动重连
 - **心率统计** — 查看当前、最低、最高、平均心率和监测时长
-- **一劳永逸** — 支持 `.local` hostname 连接，切换 WiFi 无需重新配置
+- **云端永久ID** — HDS Cloud 模式，Cloud ID 永久不变，切换网络无需重新配置
 
 ## 📦 安装
 
@@ -39,7 +39,42 @@ code --install-extension heart-socket-*.vsix
 
 ## 🔌 数据源配置
 
-### 方案 1：Health Data Server (HDS) — 推荐 ⭐
+### 方案 1：HDS Cloud — 强烈推荐 ⭐⭐
+
+> **🎉 终极解决方案！Cloud ID 永久不变，切换 WiFi/VPN/蜂窝数据都无需重新配置！**
+
+#### 为什么选择 HDS Cloud？
+
+- ☁️ **Cloud ID 永久有效** — 一次配置，永久使用
+- 🌐 **无需 IP 地址** — 不需要 `.local` 域名，不需要同一网络
+- 📡 **跨网络工作** — Watch 可用蜂窝数据发送心率
+- ⚡ **超低延迟** — Firebase 云端中转，延迟 ~100ms
+- 🆓 **心率数据免费** — HDS Cloud 心率功能完全免费
+
+#### 只需 3 步：
+
+**① 安装 Watch App**
+
+在 Apple Watch 上购买并安装 [Health Data Server](https://apps.apple.com/us/app/health-data-server/id1496042074)（需 watchOS 8+）。
+
+**② 在 VSCode 中连接**
+
+按 `Cmd+Shift+P` → 输入 `Heart Socket: Connect` → 选择 **"☁️ HDS Cloud"**（强烈推荐）→ 确认。
+
+插件会自动生成一个 **6 位 Cloud ID**（如 `a3x7k2`），并打开引导面板显示完整配置步骤。
+
+**③ 配置 Apple Watch**
+
+1. 打开 Watch 上的 HDS App → 进入 **Settings（设置）**。
+2. **打开 HDS Cloud 开关**（必须启用）。
+3. 在 **Overlay IDs** 输入框中 **粘贴** VSCode 引导面板中显示的 **Cloud ID**（如 `a3x7k2`）。
+4. 点击 Watch 上的 **Start** 按钮 → VSCode 状态栏立即显示实时心率 ♥ 🎉
+
+> 💡 **Cloud ID 只需配置一次，以后永久有效，切换任何网络都无需重新配置！**
+
+---
+
+### 方案 2：HDS 本地连接 — 推荐 ⭐
 
 > **零中间件，Apple Watch 直连 VSCode！** 插件内置 WebSocket Server，HDS Watch App 直接推送心率数据到插件，无需安装任何桌面端软件。
 
@@ -51,9 +86,9 @@ code --install-extension heart-socket-*.vsix
 
 **② 在 VSCode 中启动**
 
-按 `Cmd+Shift+P` → 输入 `Heart Socket: Connect` → 插件自动启动 WebSocket Server（默认端口 `8580`）。
+按 `Cmd+Shift+P` → 输入 `Heart Socket: Connect` → 选择 **"💓 HDS 本地连接"** → 插件自动启动 WebSocket Server（默认端口 `8580`）。
 
-启动后状态栏会显示 `♡ 等待设备连接...`，同时弹出提示告知监听端口。
+启动后状态栏会显示 `♡ 等待设备连接...`，同时 VSCode 会打开 **引导面板** 显示完整的服务器地址。
 
 **③ 配置 Apple Watch**
 
@@ -61,18 +96,20 @@ code --install-extension heart-socket-*.vsix
 2. 打开 Watch 上的 HDS App → **关闭 HDS Cloud 开关**。
 3. 在 Overlay IDs 输入框中填入完整 URL 地址：
 
-   **推荐（一劳永逸，切换 WiFi 无需修改）：**
+   **📡 推荐方式（切换 WiFi 无需修改）：**
+   
+   引导面板中会显示类似：
    ```
-   http://你的电脑名.local:8580/
+   http://MacBook-Air.local:8580/
    ```
-   > 💡 Mac 的电脑名可在 **系统设置 → 通用 → 关于本机 → 名称** 中查看，插件启动后也会在提示中显示。
-   > 例如：`http://FlippySun-MacBook.local:8580/`
-
-   **备用（使用 IP 地址）：**
+   
+   **直接复制这个地址** 粘贴到 Watch（不要手动输入）
+   
+   **🔌 备用方式（使用 IP 地址）：**
    ```
    http://192.168.x.x:8580/
    ```
-   > Mac 的局域网 IP 可通过终端运行 `ifconfig | grep "inet " | grep -v 127.0.0.1` 查看。
+   > 💡 Mac 的局域网 IP 可通过终端运行 `ifconfig | grep "inet " | grep -v 127.0.0.1` 查看。
 
    > ⚠️ **URL 必须以 `http://` 开头并以 `/` 结尾**，否则 Watch 会显示 **"Bad URL"** 错误。
 
@@ -84,8 +121,11 @@ code --install-extension heart-socket-*.vsix
 |------|------|---------|
 | Watch 显示 **"Bad URL"** | URL 格式不正确 | 必须使用完整格式 `http://xxx:8580/`，**不能省略 `http://` 和末尾 `/`** |
 | Watch 显示 **"重连中"** | Watch 和 Mac 不在同一网络 | 确保 Watch 和 Mac 连接同一个 Wi-Fi |
-| 切换 WiFi 后连不上 | Mac IP 地址变了 | 使用 `http://电脑名.local:8580/` 格式可一劳永逸 |
-| 使用 `.local` 无法连接 | 路由器不支持 mDNS | 改用 IP 地址方式，建议在路由器中绑定 Mac 为固定 IP |
+| 切换 WiFi 后连不上 | Mac IP 地址变了 | 使用 `http://电脑名.local:8580/` 格式可一劳永逸（**但 Watch 上不支持，建议使用 HDS Cloud**）|
+| 💻 电脑名称和 `.local` 地址不一样 | 引导面板显示的是 **Bonjour LocalHostName**（如 `MacBook-Air.local`） | 请使用 **引导面板中显示的地址**，不要使用系统偏好设置中的"电脑名称" |
+| `.local` 无法连接 | **Apple Watch HDS App 不支持 mDNS** | **改用 HDS Cloud 模式**（强烈推荐），或使用 IP 地址并在路由器中绑定固定 IP |
+
+> 💡 **提示：如果经常切换网络或遇到 `.local` 无法连接的问题，强烈推荐使用 HDS Cloud 模式，一劳永逸！**
 
 #### 可选配置
 

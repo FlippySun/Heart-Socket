@@ -42,6 +42,10 @@
       {
         "command": "heartSocket.showStats",
         "title": "Heart Socket: Show Heart Rate Stats"
+      },
+      {
+        "command": "heartSocket.quickActions",
+        "title": "Heart Socket: Quick Actions"
       }
     ],
     "configuration": {
@@ -50,18 +54,20 @@
         "heartSocket.provider": {
           "type": "string",
           "enum": [
+            "hds-cloud",
             "hds",
             "hyperate",
             "pulsoid",
             "custom"
           ],
           "enumDescriptions": [
-            "Health Data Server (Apple Watch → WebSocket)",
+            "HDS Cloud (Apple Watch → 云端 → VSCode，Cloud ID 永久不变)",
+            "Health Data Server (Apple Watch → 本地 WiFi → VSCode)",
             "HypeRate (需要 API Token + Session ID)",
             "Pulsoid (需要 Access Token)",
             "自定义 WebSocket 服务器"
           ],
-          "default": "hds",
+          "default": "hds-cloud",
           "description": "心率数据源类型"
         },
         "heartSocket.websocketUrl": {

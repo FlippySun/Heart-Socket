@@ -60,7 +60,7 @@ export enum ConnectionStatus {
 }
 
 /** 数据源类型 */
-export type ProviderType = 'hds' | 'hyperate' | 'pulsoid' | 'custom';
+export type ProviderType = 'hds' | 'hds-cloud' | 'hyperate' | 'pulsoid' | 'custom';
 
 /** 心率区间 */
 export interface HeartRateZones {

@@ -20,8 +20,8 @@ let manager: HeartRateManager | null = null;
  * 插件激活
  */
 export function activate(context: vscode.ExtensionContext): void {
-  // 创建核心管理器
-  manager = new HeartRateManager();
+  // 创建核心管理器（传入 context 用于 globalState）
+  manager = new HeartRateManager(context);
 
   // 注册命令
   const commands: Array<{ id: string; handler: () => void | Promise<void> }> = [
@@ -40,6 +40,10 @@ export function activate(context: vscode.ExtensionContext): void {
     {
       id: 'heartSocket.showStats',
       handler: () => manager?.showStats(),
+    },
+    {
+      id: 'heartSocket.quickActions',
+      handler: () => manager?.quickActions(),
     },
   ];
 

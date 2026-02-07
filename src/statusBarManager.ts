@@ -98,8 +98,9 @@ export class StatusBarManager {
 
   /**
    * 更新连接状态
+   * @param context 可选上下文：waitingForDevice 表示首次等待设备连接（而非断开后重连）
    */
-  updateStatus(status: ConnectionStatus): void {
+  updateStatus(status: ConnectionStatus, context?: { waitingForDevice?: boolean }): void {
     this.connectionStatus = status;
 
     switch (status) {
@@ -112,14 +113,18 @@ export class StatusBarManager {
         this.showConnecting();
         break;
       case ConnectionStatus.Connected:
-        this.statusBarItem.command = 'heartSocket.disconnect';
+        this.statusBarItem.command = 'heartSocket.quickActions';
         if (this.config.showHeartbeatAnimation) {
           this.startAnimation();
         }
         break;
       case ConnectionStatus.Reconnecting:
         this.stopAnimation();
-        this.showReconnecting();
+        if (context?.waitingForDevice) {
+          this.showWaitingForDevice();
+        } else {
+          this.showReconnecting();
+        }
         break;
       case ConnectionStatus.Error:
         this.stopAnimation();
@@ -304,10 +309,16 @@ export class StatusBarManager {
     this.statusBarItem.tooltip = 'Heart Socket - 正在连接...';
   }
 
+  private showWaitingForDevice(): void {
+    this.statusBarItem.text = `$(watch) 等待设备连接...`;
+    this.statusBarItem.color = new vscode.ThemeColor('charts.blue');
+    this.statusBarItem.tooltip = 'Heart Socket - 服务已启动，等待 Apple Watch 连接...\n\n请在 Watch HDS App 中输入地址并点击 Start';
+  }
+
   private showReconnecting(): void {
     this.statusBarItem.text = `$(sync~spin) 重连中...`;
     this.statusBarItem.color = new vscode.ThemeColor('charts.yellow');
-    this.statusBarItem.tooltip = 'Heart Socket - 正在重新连接...';
+    this.statusBarItem.tooltip = 'Heart Socket - 设备断开，正在等待重新连接...';
   }
 
   private showError(): void {

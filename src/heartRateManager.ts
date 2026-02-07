@@ -13,6 +13,7 @@ import { getConfig, onConfigChange } from './config';
 import { StatusBarManager } from './statusBarManager';
 import { AlertManager } from './alertManager';
 import { HdsProvider } from './providers/hdsProvider';
+import { HdsCloudProvider } from './providers/hdsCloudProvider';
 import { HypeRateProvider } from './providers/hyperateProvider';
 import { PulsoidProvider } from './providers/pulsoidProvider';
 import { CustomProvider } from './providers/customProvider';
@@ -36,6 +37,10 @@ export class HeartRateManager {
   private alertManager: AlertManager;
   private config: HeartSocketConfig;
   private disposables: vscode.Disposable[] = [];
+  private context: vscode.ExtensionContext;
+
+  // 连接状态追踪
+  private hasEverConnected: boolean = false;
 
   // 心率统计
   private stats: HeartRateStats = {
@@ -58,8 +63,10 @@ export class HeartRateManager {
 
   // Webview 面板单例引用
   private statsPanel: vscode.WebviewPanel | null = null;
+  private guidePanel: vscode.WebviewPanel | null = null;
 
-  constructor() {
+  constructor(context: vscode.ExtensionContext) {
+    this.context = context;
     this.config = getConfig();
     this.statusBar = new StatusBarManager(this.config);
     this.alertManager = new AlertManager(this.config);
@@ -74,14 +81,23 @@ export class HeartRateManager {
 
   /**
    * 连接心率监测
+   * 首次使用时引导用户选择数据源
    */
   async connect(): Promise<void> {
+    // 首次使用：引导选择数据源
+    const hasConfigured = this.context.globalState.get<boolean>('hasConfiguredProvider', false);
+    if (!hasConfigured) {
+      await this.switchProvider();
+      return; // switchProvider 完成后会自动询问是否连接
+    }
+
     // 如果已有连接，先断开
     if (this.provider) {
       this.disconnect();
     }
 
     try {
+      this.hasEverConnected = false; // 重置连接标志
       this.provider = this.createProvider(this.config.provider);
       this.bindProviderEvents(this.provider);
       this.resetStats();
@@ -103,7 +119,54 @@ export class HeartRateManager {
       this.provider.dispose();
       this.provider = null;
     }
+    this.hasEverConnected = false;
     this.statusBar.updateStatus(ConnectionStatus.Disconnected);
+  }
+
+  /**
+   * 快速操作菜单（已连接时点击状态栏）
+   */
+  async quickActions(): Promise<void> {
+    const items: vscode.QuickPickItem[] = [
+      {
+        label: '$(graph) 查看心率统计',
+        description: this.stats.samples > 0 ? `当前 ${this.stats.current} BPM` : '暂无数据',
+      },
+      {
+        label: '$(debug-disconnect) 断开连接',
+        description: this.provider?.name ?? '',
+      },
+      {
+        label: '$(settings-gear) 切换数据源',
+        description: `当前: ${this.getProviderLabel(this.config.provider)}`,
+      },
+    ];
+
+    // 如果是 HDS Cloud 模式，添加"查看 Cloud ID"选项
+    if (this.config.provider === 'hds-cloud' && this.provider) {
+      items.splice(1, 0, {
+        label: '$(cloud) 查看/复制 Cloud ID',
+        description: 'HDS Cloud 配置信息',
+      });
+    }
+
+    const selected = await vscode.window.showQuickPick(items, {
+      placeHolder: 'Heart Socket — 选择操作',
+    });
+
+    if (!selected) {
+      return;
+    }
+
+    if (selected.label.includes('查看心率统计')) {
+      await this.showStats();
+    } else if (selected.label.includes('查看/复制 Cloud ID')) {
+      await this.showHdsCloudGuide();
+    } else if (selected.label.includes('断开连接')) {
+      this.disconnect();
+    } else if (selected.label.includes('切换数据源')) {
+      await this.switchProvider();
+    }
   }
 
   /**
@@ -112,9 +175,15 @@ export class HeartRateManager {
   async switchProvider(): Promise<void> {
     const items: vscode.QuickPickItem[] = [
       {
+        label: '$(cloud) HDS Cloud',
+        description: '⭐⭐ 强烈推荐 — 云端连接',
+        detail: 'Cloud ID 永久不变，切换 WiFi 无需重新配置，Watch 可用蜂窝数据',
+        picked: this.config.provider === 'hds-cloud',
+      },
+      {
         label: '$(heart) Health Data Server (HDS)',
-        description: '⭐ 推荐 — Apple Watch 直连',
-        detail: '插件内置 WebSocket Server，Watch 直连无需中间件，只需安装 HDS Watch App',
+        description: '⭐ 推荐 — Apple Watch 本地直连',
+        detail: '插件内置 WebSocket Server，Watch 直连无需中间件，需要同一 WiFi',
         picked: this.config.provider === 'hds',
       },
       {
@@ -148,6 +217,7 @@ export class HeartRateManager {
 
     // 从 label 中提取 provider 名称（去掉 codicon 前缀）
     const labelMap: Record<string, ProviderType> = {
+      '$(cloud) HDS Cloud': 'hds-cloud',
       '$(heart) Health Data Server (HDS)': 'hds',
       '$(pulse) Pulsoid': 'pulsoid',
       '$(broadcast) HypeRate': 'hyperate',
@@ -169,6 +239,9 @@ export class HeartRateManager {
     const wsConfig = vscode.workspace.getConfiguration('heartSocket');
     await wsConfig.update('provider', newProvider, vscode.ConfigurationTarget.Global);
 
+    // 标记已配置过（后续点击状态栏将直接连接）
+    await this.context.globalState.update('hasConfiguredProvider', true);
+
     // 询问是否立即连接
     const action = await vscode.window.showInformationMessage(
       `Heart Socket: 已配置 ${selected.description?.replace(/[⭐ ]/g, '').trim()}，是否立即连接？`,
@@ -189,6 +262,8 @@ export class HeartRateManager {
    */
   private async guideProviderSetup(type: ProviderType): Promise<boolean> {
     switch (type) {
+      case 'hds-cloud':
+        return this.guideHdsCloudSetup();
       case 'hds':
         return this.guideHdsSetup();
       case 'pulsoid':
@@ -200,6 +275,17 @@ export class HeartRateManager {
       default:
         return false;
     }
+  }
+
+  /**
+   * HDS Cloud 引导 — 无需配置，直接使用
+   */
+  private async guideHdsCloudSetup(): Promise<boolean> {
+    await vscode.window.showInformationMessage(
+      'HDS Cloud: 无需配置，Cloud ID 将自动生成。连接后会显示引导面板，请按照指引在 Watch 上输入 Cloud ID。',
+      '好的'
+    );
+    return true;
   }
 
   /**
@@ -430,6 +516,10 @@ export class HeartRateManager {
     this.disconnect();
     this.statusBar.dispose();
     this.outputChannel.dispose();
+    if (this.guidePanel) {
+      this.guidePanel.dispose();
+      this.guidePanel = null;
+    }
     this.disposables.forEach((d) => d.dispose());
     this.disposables = [];
   }
@@ -441,6 +531,8 @@ export class HeartRateManager {
    */
   private createProvider(type: ProviderType): IHeartRateProvider {
     switch (type) {
+      case 'hds-cloud':
+        return new HdsCloudProvider(this.config, this.context);
       case 'hds':
         return new HdsProvider(this.config);
       case 'hyperate':
@@ -525,41 +617,41 @@ export class HeartRateManager {
    * 处理连接状态变化
    */
   private onStatusChange(status: ConnectionStatus): void {
-    this.statusBar.updateStatus(status);
+    // 区分首次等待连接 vs 断开后重连
+    const isHds = this.config.provider === 'hds';
+    const isHdsCloud = this.config.provider === 'hds-cloud';
+    const isWaitingForDevice = status === ConnectionStatus.Reconnecting && (isHds || isHdsCloud) && !this.hasEverConnected;
+
+    this.statusBar.updateStatus(status, isWaitingForDevice ? { waitingForDevice: true } : undefined);
 
     const labels: Record<string, string> = {
       disconnected: '已断开',
       connecting: '启动中...',
       connected: '已连接',
-      reconnecting: this.config.provider === 'hds' ? '等待设备连接...' : '重连中...',
+      reconnecting: isWaitingForDevice ? '等待设备连接...' : '重连中...',
       error: '连接错误',
     };
 
     this.log(`状态: ${labels[status] ?? status}`);
 
     if (status === ConnectionStatus.Connected) {
+      this.hasEverConnected = true;
       vscode.window.showInformationMessage(`Heart Socket: 已连接到 ${this.provider?.name}`);
+
+      // 连接成功后关闭引导面板
+      if (this.guidePanel) {
+        this.guidePanel.dispose();
+        this.guidePanel = null;
+      }
     }
 
-    // HDS Server 模式：服务启动后提示用户配置 Watch
-    if (status === ConnectionStatus.Reconnecting && this.config.provider === 'hds') {
-      const port = (this.provider as HdsProvider)?.port ?? this.config.serverPort;
-      const hostname = this.getLocalHostname();
-      const ip = this.getLocalIp();
-
-      const localUrl = `http://${hostname}.local:${port}/`;
-      const ipUrl = ip ? `http://${ip}:${port}/` : null;
-
-      const lines = [
-        `Heart Socket: 服务已启动（端口 ${port}）`,
-        `\n推荐地址（切换WiFi无需修改）: ${localUrl}`,
-      ];
-      if (ipUrl) {
-        lines.push(`备用地址: ${ipUrl}`);
+    // HDS/HDS Cloud 模式：首次等待连接时打开引导面板
+    if (isWaitingForDevice) {
+      if (isHdsCloud) {
+        this.showHdsCloudGuide();
+      } else {
+        this.showHdsGuide();
       }
-      lines.push(`\n请在 Watch HDS App 的 Overlay IDs 中输入以上地址并点击 Start`);
-
-      vscode.window.showInformationMessage(lines.join('\n'));
     }
   }
 
@@ -612,15 +704,18 @@ export class HeartRateManager {
   }
 
   /**
-   * 获取本机 Bonjour hostname（去掉 .local 后缀）
+   * 获取本机 Bonjour LocalHostName（不含 .local 后缀）
+   * 注意：使用 scutil 获取的是真正的 Bonjour 注册名，
+   * 可能与系统偏好设置中的"电脑名称"不同
    */
-  private getLocalHostname(): string {
-    let hostname = os.hostname();
-    // macOS 的 os.hostname() 可能带 .local 后缀
-    if (hostname.endsWith('.local')) {
-      hostname = hostname.slice(0, -'.local'.length);
+  private getLocalHostname(): string | null {
+    try {
+      const { execSync } = require('child_process');
+      const localHostName = execSync('scutil --get LocalHostName', { encoding: 'utf-8' }).trim();
+      return localHostName || null;
+    } catch (error) {
+      return null;
     }
-    return hostname;
   }
 
   /**
@@ -637,6 +732,624 @@ export class HeartRateManager {
       }
     }
     return null;
+  }
+
+  /**
+   * 获取数据源显示名称
+   */
+  private getProviderLabel(type: ProviderType): string {
+    const labels: Record<ProviderType, string> = {
+      'hds-cloud': 'HDS Cloud (云端连接)',
+      hds: 'HDS (Apple Watch 本地直连)',
+      pulsoid: 'Pulsoid',
+      hyperate: 'HypeRate',
+      custom: '自定义 WebSocket',
+    };
+    return labels[type] ?? type;
+  }
+
+  /**
+   * 打开 HDS 设备连接引导面板
+   */
+  private showHdsGuide(): void {
+    const port = (this.provider as HdsProvider)?.port ?? this.config.serverPort;
+    const hostname = this.getLocalHostname();
+    const ip = this.getLocalIp();
+
+    // 单例模式
+    if (this.guidePanel) {
+      this.guidePanel.webview.html = this.getHdsGuideHtml(port, hostname, ip);
+      this.guidePanel.reveal(vscode.ViewColumn.One);
+      return;
+    }
+
+    this.guidePanel = vscode.window.createWebviewPanel(
+      'heartSocketGuide',
+      '💓 Heart Socket — 设备连接引导',
+      vscode.ViewColumn.One,
+      { enableScripts: true }
+    );
+
+    this.guidePanel.webview.html = this.getHdsGuideHtml(port, hostname, ip);
+
+    this.guidePanel.onDidDispose(() => {
+      this.guidePanel = null;
+    });
+  }
+
+  /**
+   * 打开 HDS Cloud 设备连接引导面板
+   */
+  private showHdsCloudGuide(): void {
+    const cloudId = (this.provider as any).getCloudId?.() ?? 'loading...';
+
+    // 单例模式
+    if (this.guidePanel) {
+      this.guidePanel.webview.html = this.getHdsCloudGuideHtml(cloudId);
+      this.guidePanel.reveal(vscode.ViewColumn.One);
+      return;
+    }
+
+    this.guidePanel = vscode.window.createWebviewPanel(
+      'heartSocketCloudGuide',
+      '☁️ Heart Socket Cloud — 设备连接引导',
+      vscode.ViewColumn.One,
+      { enableScripts: true }
+    );
+
+    this.guidePanel.webview.html = this.getHdsCloudGuideHtml(cloudId);
+
+    this.guidePanel.onDidDispose(() => {
+      this.guidePanel = null;
+    });
+  }
+
+  /**
+   * 生成 HDS 引导页 HTML
+   */
+  private getHdsGuideHtml(port: number, hostname: string | null, ip: string | null): string {
+    const localUrl = hostname ? `http://${hostname}.local:${port}/` : null;
+    const ipUrl = ip ? `http://${ip}:${port}/` : null;
+
+    const recommendedSection = localUrl
+      ? `
+      <div class="url-section recommended">
+        <div class="url-label">📡 推荐地址 <span class="badge">切换 WiFi 无需修改</span></div>
+        <div class="url-box">
+          <code id="localUrl">${localUrl}</code>
+          <button class="copy-btn" onclick="copyUrl('localUrl')">📋 复制</button>
+        </div>
+        <div class="url-hint">💡 这是 Bonjour 地址，与系统设置中的"电脑名称"可能不同，属于正常现象</div>
+      </div>`
+      : '';
+
+    const backupSection = ipUrl
+      ? `
+      <div class="url-section backup">
+        <div class="url-label">🔌 备用地址 <span class="badge secondary">当前 WiFi IP</span></div>
+        <div class="url-box">
+          <code id="ipUrl">${ipUrl}</code>
+          <button class="copy-btn" onclick="copyUrl('ipUrl')">📋 复制</button>
+        </div>
+        <div class="url-hint">⚠️ 切换 WiFi 后 IP 会变，需要重新配置</div>
+      </div>`
+      : '';
+
+    return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Heart Socket — 设备连接引导</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      padding: 32px;
+      color: var(--vscode-foreground);
+      background: var(--vscode-editor-background);
+      max-width: 720px;
+      margin: 0 auto;
+    }
+    .header {
+      text-align: center;
+      margin-bottom: 40px;
+    }
+    .header h1 {
+      font-size: 28px;
+      margin-bottom: 8px;
+    }
+    .header .subtitle {
+      font-size: 14px;
+      opacity: 0.6;
+    }
+    .status-badge {
+      display: inline-block;
+      margin-top: 12px;
+      padding: 6px 16px;
+      border-radius: 20px;
+      font-size: 13px;
+      font-weight: 500;
+      background: var(--vscode-badge-background);
+      color: var(--vscode-badge-foreground);
+      animation: pulse 2s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.6; }
+    }
+    .url-section {
+      margin-bottom: 24px;
+      border: 1px solid var(--vscode-editorWidget-border);
+      border-radius: 12px;
+      padding: 20px;
+      background: var(--vscode-editorWidget-background);
+    }
+    .url-section.recommended {
+      border-color: var(--vscode-charts-green, #4caf50);
+      border-width: 2px;
+    }
+    .url-label {
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .badge {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 10px;
+      background: var(--vscode-charts-green, #4caf50);
+      color: white;
+      font-weight: 500;
+    }
+    .badge.secondary {
+      background: var(--vscode-charts-yellow, #ff9800);
+    }
+    .url-box {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+    .url-box code {
+      flex: 1;
+      font-size: 18px;
+      font-weight: bold;
+      padding: 12px 16px;
+      border-radius: 8px;
+      background: var(--vscode-textCodeBlock-background);
+      border: 1px solid var(--vscode-editorWidget-border);
+      word-break: break-all;
+      user-select: all;
+    }
+    .copy-btn {
+      padding: 10px 18px;
+      border: none;
+      border-radius: 8px;
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      cursor: pointer;
+      font-size: 14px;
+      white-space: nowrap;
+      transition: opacity 0.2s;
+    }
+    .copy-btn:hover {
+      opacity: 0.85;
+    }
+    .copy-btn.copied {
+      background: var(--vscode-charts-green, #4caf50);
+    }
+    .url-hint {
+      font-size: 12px;
+      opacity: 0.6;
+      line-height: 1.5;
+    }
+    .steps {
+      margin-top: 32px;
+    }
+    .steps h2 {
+      font-size: 18px;
+      margin-bottom: 16px;
+    }
+    .step-list {
+      list-style: none;
+      counter-reset: step;
+    }
+    .step-list li {
+      counter-increment: step;
+      padding: 12px 16px;
+      margin-bottom: 8px;
+      border-radius: 8px;
+      background: var(--vscode-editorWidget-background);
+      border: 1px solid var(--vscode-editorWidget-border);
+      font-size: 14px;
+      line-height: 1.6;
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+    }
+    .step-list li::before {
+      content: counter(step);
+      min-width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      font-weight: bold;
+      flex-shrink: 0;
+    }
+    .faq {
+      margin-top: 32px;
+      border-top: 1px solid var(--vscode-editorWidget-border);
+      padding-top: 24px;
+    }
+    .faq h2 {
+      font-size: 16px;
+      margin-bottom: 12px;
+      opacity: 0.8;
+    }
+    .faq-item {
+      margin-bottom: 12px;
+      padding: 10px 14px;
+      border-radius: 6px;
+      background: var(--vscode-editorWidget-background);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    .faq-item strong {
+      color: var(--vscode-charts-orange, #ff9800);
+    }
+    .footer {
+      text-align: center;
+      margin-top: 32px;
+      font-size: 12px;
+      opacity: 0.4;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>💓 Heart Socket</h1>
+    <div class="subtitle">Apple Watch 心率实时监测</div>
+    <div class="status-badge">⏳ 等待设备连接中...</div>
+  </div>
+
+  ${recommendedSection}
+  ${backupSection}
+
+  <div class="steps">
+    <h2>📋 配置步骤</h2>
+    <ol class="step-list">
+      <li>确保 Apple Watch 与 Mac 连接<strong>同一个 WiFi 网络</strong></li>
+      <li>在 Apple Watch 上打开 <strong>HDS App</strong></li>
+      <li>关闭 <strong>HDS Cloud</strong> 开关（如果有）</li>
+      <li>在 <strong>Overlay IDs</strong> 输入框中 <strong>粘贴</strong> 上方复制的地址</li>
+      <li>点击 <strong>Start</strong> 按钮 → VSCode 状态栏将显示实时心率 ♥</li>
+    </ol>
+  </div>
+
+  <div class="faq">
+    <h2>⚠️ 常见问题</h2>
+    <div class="faq-item">
+      <strong>🚫 Bad URL</strong> — URL 必须以 <code>http://</code> 开头且以 <code>/</code> 结尾，缺一不可
+    </div>
+    <div class="faq-item">
+      <strong>🔄 连不上</strong> — 检查 Watch 和 Mac 是否在同一 WiFi；如果用了 VPN 请关闭
+    </div>
+    <div class="faq-item">
+      <strong>💻 地址与电脑名称不一样</strong> — 上方显示的是 Bonjour 网络名称，与系统设置中的"电脑名称"不同，属于正常
+    </div>
+    <div class="faq-item">
+      <strong>📱 没有 HDS App？</strong> — 在 App Store 搜索 <a href="https://apps.apple.com/us/app/health-data-server/id1496042074">Health Data Server</a>（需 watchOS 8+）
+    </div>
+  </div>
+
+  <div class="footer">
+    设备连接成功后，此面板会自动关闭 · 端口 ${port}
+  </div>
+
+  <script>
+    function copyUrl(elementId) {
+      const el = document.getElementById(elementId);
+      if (!el) return;
+      const text = el.textContent || '';
+      navigator.clipboard.writeText(text).then(() => {
+        const btns = el.parentElement?.querySelectorAll('.copy-btn');
+        if (btns) {
+          btns.forEach(btn => {
+            btn.textContent = '✅ 已复制';
+            btn.classList.add('copied');
+            setTimeout(() => {
+              btn.textContent = '📋 复制';
+              btn.classList.remove('copied');
+            }, 2000);
+          });
+        }
+      });
+    }
+  </script>
+</body>
+</html>`;
+  }
+
+  /**
+   * 生成 HDS Cloud 引导页 HTML
+   */
+  private getHdsCloudGuideHtml(cloudId: string): string {
+    return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Heart Socket Cloud — 设备连接引导</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      padding: 32px;
+      color: var(--vscode-foreground);
+      background: var(--vscode-editor-background);
+      max-width: 720px;
+      margin: 0 auto;
+    }
+    .header {
+      text-align: center;
+      margin-bottom: 40px;
+    }
+    .header h1 {
+      font-size: 28px;
+      margin-bottom: 8px;
+    }
+    .header .subtitle {
+      font-size: 14px;
+      opacity: 0.6;
+    }
+    .status-badge {
+      display: inline-block;
+      margin-top: 12px;
+      padding: 6px 16px;
+      border-radius: 20px;
+      font-size: 13px;
+      font-weight: 500;
+      background: var(--vscode-badge-background);
+      color: var(--vscode-badge-foreground);
+      animation: pulse 2s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.6; }
+    }
+    .cloud-id-section {
+      margin-bottom: 32px;
+      border: 2px solid var(--vscode-charts-blue, #42a5f5);
+      border-radius: 12px;
+      padding: 24px;
+      background: var(--vscode-editorWidget-background);
+      text-align: center;
+    }
+    .cloud-id-label {
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 16px;
+      color: var(--vscode-charts-blue, #42a5f5);
+    }
+    .cloud-id-box {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .cloud-id-box code {
+      font-size: 32px;
+      font-weight: bold;
+      padding: 16px 24px;
+      border-radius: 8px;
+      background: var(--vscode-textCodeBlock-background);
+      border: 1px solid var(--vscode-editorWidget-border);
+      letter-spacing: 3px;
+      user-select: all;
+    }
+    .copy-btn {
+      padding: 12px 20px;
+      border: none;
+      border-radius: 8px;
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      cursor: pointer;
+      font-size: 14px;
+      white-space: nowrap;
+      transition: opacity 0.2s;
+    }
+    .copy-btn:hover {
+      opacity: 0.85;
+    }
+    .copy-btn.copied {
+      background: var(--vscode-charts-green, #4caf50);
+    }
+    .cloud-id-hint {
+      font-size: 13px;
+      opacity: 0.7;
+      line-height: 1.5;
+    }
+    .advantage {
+      background: var(--vscode-editorWidget-background);
+      border: 1px solid var(--vscode-editorWidget-border);
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 24px;
+    }
+    .advantage h3 {
+      font-size: 16px;
+      margin-bottom: 12px;
+      color: var(--vscode-charts-green, #4caf50);
+    }
+    .advantage ul {
+      list-style: none;
+      padding: 0;
+    }
+    .advantage li {
+      padding: 6px 0;
+      font-size: 14px;
+      line-height: 1.6;
+    }
+    .advantage li::before {
+      content: "✓ ";
+      color: var(--vscode-charts-green, #4caf50);
+      font-weight: bold;
+      margin-right: 8px;
+    }
+    .steps {
+      margin-top: 32px;
+    }
+    .steps h2 {
+      font-size: 18px;
+      margin-bottom: 16px;
+    }
+    .step-list {
+      list-style: none;
+      counter-reset: step;
+    }
+    .step-list li {
+      counter-increment: step;
+      padding: 12px 16px;
+      margin-bottom: 8px;
+      border-radius: 8px;
+      background: var(--vscode-editorWidget-background);
+      border: 1px solid var(--vscode-editorWidget-border);
+      font-size: 14px;
+      line-height: 1.6;
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+    }
+    .step-list li::before {
+      content: counter(step);
+      min-width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      font-weight: bold;
+      flex-shrink: 0;
+    }
+    .faq {
+      margin-top: 32px;
+      border-top: 1px solid var(--vscode-editorWidget-border);
+      padding-top: 24px;
+    }
+    .faq h2 {
+      font-size: 16px;
+      margin-bottom: 12px;
+      opacity: 0.8;
+    }
+    .faq-item {
+      margin-bottom: 12px;
+      padding: 10px 14px;
+      border-radius: 6px;
+      background: var(--vscode-editorWidget-background);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    .faq-item strong {
+      color: var(--vscode-charts-orange, #ff9800);
+    }
+    .footer {
+      text-align: center;
+      margin-top: 32px;
+      font-size: 12px;
+      opacity: 0.4;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>☁️ Heart Socket Cloud</h1>
+    <div class="subtitle">Apple Watch 心率云端实时监测</div>
+    <div class="status-badge">⏳ 等待 Watch 推送数据...</div>
+  </div>
+
+  <div class="cloud-id-section">
+    <div class="cloud-id-label">☁️ 你的专属 Cloud ID</div>
+    <div class="cloud-id-box">
+      <code id="cloudId">${cloudId}</code>
+      <button class="copy-btn" onclick="copyCloudId()">📋 复制</button>
+    </div>
+    <div class="cloud-id-hint">💡 此 Cloud ID 永久有效，切换网络无需修改</div>
+  </div>
+
+  <div class="advantage">
+    <h3>🎉 HDS Cloud 优势</h3>
+    <ul>
+      <li>Cloud ID 永久不变，切换 WiFi、VPN、蜂窝数据都无需重新配置</li>
+      <li>不需要 IP 地址，不需要 .local 域名，不需要同一网络</li>
+      <li>Watch 可以在任何网络环境下发送数据（包括蜂窝数据）</li>
+      <li>数据通过 Firebase 云端中转，延迟极低（~100ms）</li>
+    </ul>
+  </div>
+
+  <div class="steps">
+    <h2>📋 配置步骤</h2>
+    <ol class="step-list">
+      <li>在 Apple Watch 上打开 <strong>HDS App</strong></li>
+      <li>进入 <strong>Settings（设置）</strong></li>
+      <li>打开 <strong>HDS Cloud</strong> 开关（必须启用）</li>
+      <li>在 <strong>Overlay IDs</strong> 输入框中 <strong>粘贴</strong> 上方的 Cloud ID（<code>${cloudId}</code>）</li>
+      <li>点击 <strong>Start</strong> 按钮 → VSCode 状态栏将显示实时心率 ♥</li>
+    </ol>
+  </div>
+
+  <div class="faq">
+    <h2>⚠️ 常见问题</h2>
+    <div class="faq-item">
+      <strong>🔄 连不上</strong> — 确保 Watch 已启用 HDS Cloud 开关，并输入正确的 Cloud ID
+    </div>
+    <div class="faq-item">
+      <strong>📱 没有 HDS App？</strong> — 在 App Store 搜索 <a href="https://apps.apple.com/us/app/health-data-server/id1496042074">Health Data Server</a>（需 watchOS 8+）
+    </div>
+    <div class="faq-item">
+      <strong>💰 HDS Cloud 收费吗？</strong> — 心率数据完全免费，其他健康数据（卡路里、步数等）需要付费订阅
+    </div>
+    <div class="faq-item">
+      <strong>🛡️ 数据安全吗？</strong> — 数据仅在连接期间临时存储在 Firebase，不会持久化保存，连接断开后自动清除
+    </div>
+  </div>
+
+  <div class="footer">
+    设备连接成功后，此面板会自动关闭 · Cloud ID: ${cloudId}
+  </div>
+
+  <script>
+    function copyCloudId() {
+      const el = document.getElementById('cloudId');
+      if (!el) return;
+      const text = el.textContent || '';
+      navigator.clipboard.writeText(text).then(() => {
+        const btn = el.parentElement?.querySelector('.copy-btn');
+        if (btn) {
+          btn.textContent = '✅ 已复制';
+          btn.classList.add('copied');
+          setTimeout(() => {
+            btn.textContent = '📋 复制';
+            btn.classList.remove('copied');
+          }, 2000);
+        }
+      });
+    }
+  </script>
+</body>
+</html>`;
   }
 
   /**
