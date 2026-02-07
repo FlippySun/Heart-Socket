@@ -1,0 +1,176 @@
+{
+  "name": "heart-socket",
+  "displayName": "Heart Socket - Apple Watch Heart Rate Monitor",
+  "description": "Real-time Apple Watch heart rate display in VS Code status bar. Supports HDS, HypeRate, Pulsoid, and custom WebSocket sources.",
+  "version": "0.1.0",
+  "publisher": "flippysun",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "heart rate",
+    "apple watch",
+    "health",
+    "monitor",
+    "websocket",
+    "bpm"
+  ],
+  "icon": "media/icon.png",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "heartSocket.connect",
+        "title": "Heart Socket: Connect",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "heartSocket.disconnect",
+        "title": "Heart Socket: Disconnect",
+        "icon": "$(debug-disconnect)"
+      },
+      {
+        "command": "heartSocket.switchProvider",
+        "title": "Heart Socket: Switch Provider"
+      },
+      {
+        "command": "heartSocket.showStats",
+        "title": "Heart Socket: Show Heart Rate Stats"
+      }
+    ],
+    "configuration": {
+      "title": "Heart Socket",
+      "properties": {
+        "heartSocket.provider": {
+          "type": "string",
+          "enum": [
+            "hds",
+            "hyperate",
+            "pulsoid",
+            "custom"
+          ],
+          "enumDescriptions": [
+            "Health Data Server (Apple Watch → WebSocket)",
+            "HypeRate (需要 API Token + Session ID)",
+            "Pulsoid (需要 Access Token)",
+            "自定义 WebSocket 服务器"
+          ],
+          "default": "hds",
+          "description": "心率数据源类型"
+        },
+        "heartSocket.websocketUrl": {
+          "type": "string",
+          "default": "ws://localhost:8080",
+          "description": "WebSocket 连接地址（HDS / 自定义数据源使用）"
+        },
+        "heartSocket.apiToken": {
+          "type": "string",
+          "default": "",
+          "description": "API Token（HypeRate / Pulsoid 使用）"
+        },
+        "heartSocket.sessionId": {
+          "type": "string",
+          "default": "",
+          "description": "Session ID（HypeRate 使用）"
+        },
+        "heartSocket.autoConnect": {
+          "type": "boolean",
+          "default": false,
+          "description": "VS Code 启动时自动连接心率监测"
+        },
+        "heartSocket.alertHighBpm": {
+          "type": "number",
+          "default": 150,
+          "minimum": 80,
+          "maximum": 220,
+          "description": "高心率告警阈值 (BPM)"
+        },
+        "heartSocket.alertLowBpm": {
+          "type": "number",
+          "default": 50,
+          "minimum": 30,
+          "maximum": 80,
+          "description": "低心率告警阈值 (BPM)"
+        },
+        "heartSocket.alertCooldown": {
+          "type": "number",
+          "default": 60,
+          "minimum": 10,
+          "maximum": 600,
+          "description": "告警冷却时间（秒），避免频繁弹窗"
+        },
+        "heartSocket.heartRateJsonPath": {
+          "type": "string",
+          "default": "heartRate",
+          "description": "自定义数据源中心率字段的 JSON 路径（用 . 分隔，如 data.heart_rate）"
+        },
+        "heartSocket.statusBarPosition": {
+          "type": "string",
+          "enum": [
+            "left",
+            "right"
+          ],
+          "default": "left",
+          "description": "状态栏显示位置"
+        },
+        "heartSocket.showHeartbeatAnimation": {
+          "type": "boolean",
+          "default": true,
+          "description": "启用心跳动画效果"
+        },
+        "heartSocket.zones": {
+          "type": "object",
+          "default": {
+            "rest": 60,
+            "normal": 100,
+            "moderate": 140,
+            "high": 170
+          },
+          "description": "心率区间阈值配置（BPM）",
+          "properties": {
+            "rest": {
+              "type": "number",
+              "description": "静息心率上限"
+            },
+            "normal": {
+              "type": "number",
+              "description": "正常心率上限"
+            },
+            "moderate": {
+              "type": "number",
+              "description": "中等强度上限"
+            },
+            "high": {
+              "type": "number",
+              "description": "高强度上限（超过此值为极高强度）"
+            }
+          }
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "node esbuild.js --production",
+    "watch": "node esbuild.js --watch",
+    "lint": "eslint src --ext ts",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@types/ws": "^8.5.10",
+    "esbuild": "^0.20.0",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "ws": "^8.16.0"
+  }
+}

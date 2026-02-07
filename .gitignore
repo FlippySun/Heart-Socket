@@ -1,0 +1,50 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+out/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor directories
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/extensions.json
+
+# VSIX package
+*.vsix
+
+# Environment
+*.local
+.env
+.env.*
+
+# TypeScript build info
+*.tsbuildinfo
+
+# AI config & prompts (local only)
+.claude/
+.mcp.json
+CLAUDE.md
+.roo/
+.repomix/
+.github/agents/
+.github/prompts/
+.github/skills/
+.github/settings.local.json
+
+# Old project config (local only)
+.cnb.yml
+.editorconfig
+.gitattributes
+.prettierrc.json
+.playwright-mcp/
+start-vscode.sh

@@ -1,0 +1,261 @@
+/**
+ * Heart Socket - 状态栏管理器
+ *
+ * 负责在 VSCode 状态栏显示心率数据，包括：
+ * - 心率数值 + 心跳图标
+ * - 根据心率区间自动变色
+ * - 心跳动画效果
+ * - 连接状态指示
+ */
+import * as vscode from 'vscode';
+import { ConnectionStatus } from './types';
+import type {
+  HeartRateData,
+  HeartRateZoneName,
+  HeartSocketConfig,
+} from './types';
+
+/** 心率区间对应的颜色主题 */
+const ZONE_COLORS: Record<HeartRateZoneName, vscode.ThemeColor> = {
+  low: new vscode.ThemeColor('charts.blue'),
+  rest: new vscode.ThemeColor('charts.blue'),
+  normal: new vscode.ThemeColor('charts.green'),
+  moderate: new vscode.ThemeColor('charts.yellow'),
+  high: new vscode.ThemeColor('charts.orange'),
+  extreme: new vscode.ThemeColor('charts.red'),
+};
+
+/** 心率区间对应的描述 */
+const ZONE_LABELS: Record<HeartRateZoneName, string> = {
+  low: '⚠️ 偏低',
+  rest: '😌 静息',
+  normal: '😊 正常',
+  moderate: '🏃 中等强度',
+  high: '🔥 高强度',
+  extreme: '🚨 极高强度',
+};
+
+/** 心跳动画图标交替 */
+const HEART_ICONS = ['♥', '♡'];
+
+export class StatusBarManager {
+  private statusBarItem: vscode.StatusBarItem;
+  private animationTimer: ReturnType<typeof setInterval> | null = null;
+  private animationFrame: number = 0;
+  private lastBpm: number = 0;
+  private lastZone: HeartRateZoneName = 'normal';
+  private connectionStatus: ConnectionStatus = ConnectionStatus.Disconnected;
+  private config: HeartSocketConfig;
+
+  /** 节流：最小更新间隔 (ms) */
+  private lastUpdateTime: number = 0;
+  private readonly UPDATE_THROTTLE = 500;
+  private pendingUpdate: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(config: HeartSocketConfig) {
+    this.config = config;
+
+    // 创建状态栏项
+    const alignment =
+      config.statusBarPosition === 'left'
+        ? vscode.StatusBarAlignment.Left
+        : vscode.StatusBarAlignment.Right;
+
+    this.statusBarItem = vscode.window.createStatusBarItem(
+      alignment,
+      config.statusBarPosition === 'left' ? 100 : 0
+    );
+
+    this.statusBarItem.command = 'heartSocket.connect';
+    this.showDisconnected();
+    this.statusBarItem.show();
+  }
+
+  /**
+   * 更新心率显示
+   */
+  updateHeartRate(data: HeartRateData): void {
+    this.lastBpm = data.bpm;
+    this.lastZone = this.getZone(data.bpm);
+    this.throttledUpdate();
+  }
+
+  /**
+   * 更新连接状态
+   */
+  updateStatus(status: ConnectionStatus): void {
+    this.connectionStatus = status;
+
+    switch (status) {
+      case ConnectionStatus.Disconnected:
+        this.stopAnimation();
+        this.showDisconnected();
+        break;
+      case ConnectionStatus.Connecting:
+        this.stopAnimation();
+        this.showConnecting();
+        break;
+      case ConnectionStatus.Connected:
+        this.statusBarItem.command = 'heartSocket.disconnect';
+        if (this.config.showHeartbeatAnimation) {
+          this.startAnimation();
+        }
+        break;
+      case ConnectionStatus.Reconnecting:
+        this.stopAnimation();
+        this.showReconnecting();
+        break;
+      case ConnectionStatus.Error:
+        this.stopAnimation();
+        this.showError();
+        break;
+    }
+  }
+
+  /**
+   * 更新配置
+   */
+  updateConfig(config: HeartSocketConfig): void {
+    this.config = config;
+    // 重新渲染当前状态
+    if (this.lastBpm > 0) {
+      this.renderHeartRate();
+    }
+  }
+
+  /**
+   * 销毁
+   */
+  dispose(): void {
+    this.stopAnimation();
+    if (this.pendingUpdate) {
+      clearTimeout(this.pendingUpdate);
+      this.pendingUpdate = null;
+    }
+    this.statusBarItem.dispose();
+  }
+
+  // ─── 私有方法 ───────────────────────────────────
+
+  /**
+   * 节流更新
+   */
+  private throttledUpdate(): void {
+    const now = Date.now();
+    const elapsed = now - this.lastUpdateTime;
+
+    if (elapsed >= this.UPDATE_THROTTLE) {
+      this.lastUpdateTime = now;
+      this.renderHeartRate();
+    } else if (!this.pendingUpdate) {
+      this.pendingUpdate = setTimeout(() => {
+        this.pendingUpdate = null;
+        this.lastUpdateTime = Date.now();
+        this.renderHeartRate();
+      }, this.UPDATE_THROTTLE - elapsed);
+    }
+  }
+
+  /**
+   * 渲染心率显示
+   */
+  private renderHeartRate(): void {
+    const icon = this.config.showHeartbeatAnimation
+      ? HEART_ICONS[this.animationFrame % HEART_ICONS.length]
+      : HEART_ICONS[0];
+
+    this.statusBarItem.text = `${icon} ${this.lastBpm} BPM`;
+    this.statusBarItem.color = ZONE_COLORS[this.lastZone];
+    this.statusBarItem.tooltip = this.buildTooltip();
+  }
+
+  /**
+   * 构建 tooltip 信息
+   */
+  private buildTooltip(): string {
+    const zoneLabel = ZONE_LABELS[this.lastZone];
+    const lines = [
+      `Heart Socket - ${zoneLabel}`,
+      `━━━━━━━━━━━━━━━━━━━━`,
+      `💓 当前心率: ${this.lastBpm} BPM`,
+      `📊 心率区间: ${zoneLabel}`,
+      `🔗 连接状态: ${this.getStatusLabel()}`,
+      ``,
+      `点击断开连接`,
+    ];
+    return lines.join('\n');
+  }
+
+  private getStatusLabel(): string {
+    const labels: Record<string, string> = {
+      disconnected: '未连接',
+      connecting: '连接中...',
+      connected: '已连接',
+      reconnecting: '重连中...',
+      error: '连接错误',
+    };
+    return labels[this.connectionStatus] ?? '未知';
+  }
+
+  /**
+   * 获取心率区间
+   */
+  private getZone(bpm: number): HeartRateZoneName {
+    const zones = this.config.zones;
+    if (bpm < this.config.alertLowBpm) { return 'low'; }
+    if (bpm < zones.rest) { return 'rest'; }
+    if (bpm < zones.normal) { return 'normal'; }
+    if (bpm < zones.moderate) { return 'moderate'; }
+    if (bpm < zones.high) { return 'high'; }
+    return 'extreme';
+  }
+
+  /**
+   * 启动心跳动画
+   */
+  private startAnimation(): void {
+    this.stopAnimation();
+    this.animationFrame = 0;
+    this.animationTimer = setInterval(() => {
+      this.animationFrame++;
+      if (this.lastBpm > 0) {
+        this.renderHeartRate();
+      }
+    }, 800); // 每 800ms 切换一次图标，模拟心跳
+  }
+
+  private stopAnimation(): void {
+    if (this.animationTimer) {
+      clearInterval(this.animationTimer);
+      this.animationTimer = null;
+    }
+  }
+
+  // ─── 状态显示 ───────────────────────────────────
+
+  private showDisconnected(): void {
+    this.statusBarItem.text = `$(heart) Heart Socket`;
+    this.statusBarItem.color = undefined;
+    this.statusBarItem.tooltip = 'Heart Socket - 点击连接心率监测';
+    this.statusBarItem.command = 'heartSocket.connect';
+  }
+
+  private showConnecting(): void {
+    this.statusBarItem.text = `$(loading~spin) 连接中...`;
+    this.statusBarItem.color = undefined;
+    this.statusBarItem.tooltip = 'Heart Socket - 正在连接...';
+  }
+
+  private showReconnecting(): void {
+    this.statusBarItem.text = `$(sync~spin) 重连中...`;
+    this.statusBarItem.color = new vscode.ThemeColor('charts.yellow');
+    this.statusBarItem.tooltip = 'Heart Socket - 正在重新连接...';
+  }
+
+  private showError(): void {
+    this.statusBarItem.text = `$(error) Heart Socket`;
+    this.statusBarItem.color = new vscode.ThemeColor('charts.red');
+    this.statusBarItem.tooltip = 'Heart Socket - 连接失败，点击重试';
+    this.statusBarItem.command = 'heartSocket.connect';
+  }
+}
