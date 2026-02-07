@@ -6,12 +6,13 @@ import type { HeartSocketConfig, HeartRateZones, ProviderType } from './types';
 
 const CONFIG_SECTION = 'heartSocket';
 
-/** 默认心率区间 */
+/** 默认心率区间（编程场景优化，在静息范围内细粒度划分） */
 const DEFAULT_ZONES: HeartRateZones = {
-  rest: 60,
-  normal: 100,
-  moderate: 140,
-  high: 170,
+  relax: 60,
+  calm: 72,
+  focused: 85,
+  tense: 100,
+  stressed: 120,
 };
 
 /**

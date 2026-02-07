@@ -163,28 +163,33 @@
         "heartSocket.zones": {
           "type": "object",
           "default": {
-            "rest": 60,
-            "normal": 100,
-            "moderate": 140,
-            "high": 170
+            "relax": 60,
+            "calm": 72,
+            "focused": 85,
+            "tense": 100,
+            "stressed": 120
           },
-          "description": "心率区间阈值配置（BPM）",
+          "markdownDescription": "心率区间阈值配置（BPM）— 针对编程场景优化，在静息范围内细粒度划分",
           "properties": {
-            "rest": {
+            "relax": {
               "type": "number",
-              "description": "静息心率上限"
+              "description": "放松上限（低于此值为放松状态）"
             },
-            "normal": {
+            "calm": {
               "type": "number",
-              "description": "正常心率上限"
+              "description": "平静上限（阅读文档、Review 代码）"
             },
-            "moderate": {
+            "focused": {
               "type": "number",
-              "description": "中等强度上限"
+              "description": "专注上限（深度编码、解决问题）"
             },
-            "high": {
+            "tense": {
               "type": "number",
-              "description": "高强度上限（超过此值为极高强度）"
+              "description": "紧张上限（Debug、赶 deadline）"
+            },
+            "stressed": {
+              "type": "number",
+              "description": "高压上限（超过此值为异常）"
             }
           }
         },

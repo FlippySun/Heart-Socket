@@ -10,7 +10,7 @@
 
 - **实时心率显示** — 状态栏显示当前心率 BPM + 心跳动画
 - **多种健康数据** — 心率、卡路里、步数、血氧、距离、速度等一目了然
-- **心率区间变色** — 根据心率自动切换颜色（蓝/绿/黄/橙/红）
+- **心率区间变色** — 编程场景优化的 7 级区间（放松/平静/专注/紧张/高压/异常），在静息范围细粒度划分
 - **多数据源支持** — HDS 本地直连 / HypeRate / Pulsoid / 自定义 WebSocket
 - **智能告警** — 高心率/低心率弹窗提醒，可配置阈值和冷却时间
 - **自动重连** — 网络断开后指数退避自动重连
@@ -245,7 +245,7 @@ HypeRate 数据源的 Motion 功能支持情况与 **Pulsoid（方案 2）** 相
 | `heartSocket.speedJsonPath` | string | `""` | 自定义数据源速度字段 JSON 路径（留空不启用） |
 | `heartSocket.statusBarPosition` | enum | `left` | 状态栏位置 |
 | `heartSocket.showHeartbeatAnimation` | boolean | `true` | 心跳动画 |
-| `heartSocket.zones` | object | `{rest:60,...}` | 心率区间阈值 |
+| `heartSocket.zones` | object | `{relax:60,...}` | 心率区间阈值（编程场景优化） |
 | `heartSocket.enableMotion` | boolean | `true` | 启用 Motion 传感器数据分析（需 HDS） |
 | `heartSocket.sedentaryMinutes` | number | `45` | 久坐提醒阈值（分钟，10-120） |
 | `heartSocket.postureAlertSeconds` | number | `30` | 不良姿态提醒阈值（秒，10-300） |
@@ -262,16 +262,19 @@ HypeRate 数据源的 Motion 功能支持情况与 **Pulsoid（方案 2）** 相
 | `Heart Socket: Switch Provider` | 切换数据源 |
 | `Heart Socket: Show Heart Rate Stats` | 显示心率统计 |
 
-## 🎨 心率区间颜色
+## 🎨 心率区间颜色（编程场景优化）
+
+> 针对开发者久坐编程场景，在 50-100 BPM 静息范围内做了细粒度划分，让你能感知编程时的心理状态变化。
 
 | 区间 | BPM 范围 | 颜色 | 说明 |
 |------|----------|------|------|
 | 偏低 | < 50 | 🔵 蓝色 | 低于告警阈值 |
-| 静息 | 50-60 | 🔵 蓝色 | 静息状态 |
-| 正常 | 60-100 | 🟢 绿色 | 正常范围 |
-| 中等 | 100-140 | 🟡 黄色 | 中等运动强度 |
-| 高强度 | 140-170 | 🟠 橙色 | 高强度运动 |
-| 极高 | > 170 | 🔴 红色 | 需要注意 |
+| 😴 放松 | 50-60 | 🔵 蓝色 | 深度休息、冥想 |
+| 😌 平静 | 60-72 | 🟢 绿色 | 阅读文档、Review 代码 |
+| 🧠 专注 | 72-85 | 🟣 紫色 | 深度编码、解决问题 |
+| 😰 紧张 | 85-100 | 🟡 黄色 | Debug、赶 deadline |
+| 😤 高压 | 100-120 | 🟠 橙色 | 线上事故、紧急会议 |
+| 🚨 异常 | > 120 | 🔴 红色 | 坐着心率超 120 需关注 |
 
 ## 🏗 架构
 

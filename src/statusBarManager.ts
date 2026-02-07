@@ -22,21 +22,23 @@ import type {
 /** 心率区间对应的颜色主题 */
 const ZONE_COLORS: Record<HeartRateZoneName, vscode.ThemeColor> = {
   low: new vscode.ThemeColor('charts.blue'),
-  rest: new vscode.ThemeColor('charts.blue'),
-  normal: new vscode.ThemeColor('charts.green'),
-  moderate: new vscode.ThemeColor('charts.yellow'),
-  high: new vscode.ThemeColor('charts.orange'),
+  relax: new vscode.ThemeColor('charts.blue'),
+  calm: new vscode.ThemeColor('charts.green'),
+  focused: new vscode.ThemeColor('charts.purple'),
+  tense: new vscode.ThemeColor('charts.yellow'),
+  stressed: new vscode.ThemeColor('charts.orange'),
   extreme: new vscode.ThemeColor('charts.red'),
 };
 
 /** 心率区间对应的描述 */
 const ZONE_LABELS: Record<HeartRateZoneName, string> = {
   low: '⚠️ 偏低',
-  rest: '😌 静息',
-  normal: '😊 正常',
-  moderate: '🏃 中等强度',
-  high: '🔥 高强度',
-  extreme: '🚨 极高强度',
+  relax: '😴 放松',
+  calm: '😌 平静',
+  focused: '🧠 专注',
+  tense: '😰 紧张',
+  stressed: '😤 高压',
+  extreme: '🚨 异常',
 };
 
 /** 心跳动画图标交替 */
@@ -64,7 +66,7 @@ export class StatusBarManager {
   private animationTimer: ReturnType<typeof setInterval> | null = null;
   private animationFrame: number = 0;
   private lastBpm: number = 0;
-  private lastZone: HeartRateZoneName = 'normal';
+  private lastZone: HeartRateZoneName = 'calm';
   private connectionStatus: ConnectionStatus = ConnectionStatus.Disconnected;
   private config: HeartSocketConfig;
   private healthSnapshot: HealthSnapshot = {};
@@ -361,10 +363,11 @@ export class StatusBarManager {
   private getZone(bpm: number): HeartRateZoneName {
     const zones = this.config.zones;
     if (bpm < this.config.alertLowBpm) { return 'low'; }
-    if (bpm < zones.rest) { return 'rest'; }
-    if (bpm < zones.normal) { return 'normal'; }
-    if (bpm < zones.moderate) { return 'moderate'; }
-    if (bpm < zones.high) { return 'high'; }
+    if (bpm < zones.relax) { return 'relax'; }
+    if (bpm < zones.calm) { return 'calm'; }
+    if (bpm < zones.focused) { return 'focused'; }
+    if (bpm < zones.tense) { return 'tense'; }
+    if (bpm < zones.stressed) { return 'stressed'; }
     return 'extreme';
   }
 

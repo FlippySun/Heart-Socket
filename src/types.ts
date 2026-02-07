@@ -143,20 +143,22 @@ export enum ConnectionStatus {
 /** 数据源类型 */
 export type ProviderType = 'hds' | 'hyperate' | 'pulsoid' | 'custom';
 
-/** 心率区间 */
+/** 心率区间（编程场景优化，在静息范围内细粒度划分） */
 export interface HeartRateZones {
-  /** 静息心率上限 */
-  rest: number;
-  /** 正常心率上限 */
-  normal: number;
-  /** 中等强度上限 */
-  moderate: number;
-  /** 高强度上限（超过此值为极高强度） */
-  high: number;
+  /** 放松上限（默认 60） */
+  relax: number;
+  /** 平静上限（默认 72） */
+  calm: number;
+  /** 专注上限（默认 85） */
+  focused: number;
+  /** 紧张上限（默认 100） */
+  tense: number;
+  /** 高压上限（超过此值为异常，默认 120） */
+  stressed: number;
 }
 
 /** 心率区间名称 */
-export type HeartRateZoneName = 'low' | 'rest' | 'normal' | 'moderate' | 'high' | 'extreme';
+export type HeartRateZoneName = 'low' | 'relax' | 'calm' | 'focused' | 'tense' | 'stressed' | 'extreme';
 
 /** 插件配置 */
 export interface HeartSocketConfig {
