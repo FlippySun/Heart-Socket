@@ -37,131 +37,97 @@ code --install-extension heart-socket-*.vsix
 
 ## 🔌 数据源配置
 
-### 方案 1：Health Data Server (HDS) — 推荐
+### 方案 1：Health Data Server (HDS) — 推荐 ⭐
 
-> HDS 是一个专为 Apple Watch 设计的心率广播 App，支持将心率数据实时推送到本地网络或云端。本插件支持**本地中继模式**连接。
+> **零中间件，Apple Watch 直连 VSCode！** 插件内置 WebSocket Server，HDS Watch App 直接推送心率数据到插件，无需安装任何桌面端软件。
 
-#### 1. 准备工作
-*   在 Apple Watch 上购买并安装 [Health Data Server](https://apps.apple.com/us/app/health-data-server/id1496042074)。
-*   在 Mac 上下载 **HDS Overlay (Desktop)** 客户端（作为本地 WebSocket 中继服务器）：
-    *   下载地址：[Rexios80/hds_overlay (GitHub)](https://github.com/Rexios80/hds_overlay/releases) 或 [pilo1337/Health-Data-Server-Overlay](https://github.com/pilo1337/Health-Data-Server-Overlay/releases)
-    *   下载对应 macOS 版本并解压。
+#### 只需 3 步：
 
-#### 2. 运行本地服务
-1.  双击运行 HDS Overlay 应用。
-2.  可能会弹出 macOS 安全警告，需在【系统偏好设置】->【安全性与隐私】中允许运行。
-3.  应用启动后，它会在本地开启 WebSocket 服务，默认端口为 **3476**（这是数据传输端口，不是 8080）。
+**① 安装 Watch App**
 
-#### 3. 配置 Apple Watch
-1.  确保 Apple Watch 与 Mac 连接在 **同一个 Wi-Fi 网络** 下。
-2.  获取 Mac 的局域网 IP 地址（例如 `192.168.1.5`）。
-3.  在 Apple Watch 打开 HDS App，进入设置。
-4.  将 **Configuration** 目标地址设置为你 Mac 的 IP 和端口，格式为 `IP:Port`。
-    *   例如：`192.168.1.5:3476`
-5.  点击 Watch 上的 **Start** 按钮开始广播数据。HDS Overlay 界面上应该能看到心率数字跳动。
+在 Apple Watch 上购买并安装 [Health Data Server](https://apps.apple.com/us/app/health-data-server/id1496042074)（需 watchOS 8+）。
 
-#### 4. 配置插件
-在 VS Code 设置中配置：
+**② 在 VSCode 中启动**
+
+按 `Cmd+Shift+P` → 输入 `Heart Socket: Connect` → 插件自动启动 WebSocket Server（默认端口 `8580`）。
+
+启动后状态栏会显示 `♡ 等待设备连接...`，同时弹出提示告知监听端口。
+
+**③ 配置 Apple Watch**
+
+1. 确保 Apple Watch 与 Mac 在 **同一个 Wi-Fi 网络**。
+2. 获取 Mac 的局域网 IP（终端运行 `ifconfig | grep "inet " | grep -v 127.0.0.1`，或在**系统偏好设置 → Wi-Fi → 详细信息**中查看）。
+3. 打开 Watch 上的 HDS App → 设置目标地址为 `你的Mac IP:8580`（例如 `192.168.1.5:8580`）。
+4. 点击 Watch 上的 **Start** 按钮 → VSCode 状态栏立即显示实时心率 ♥ 🎉
+
+#### 可选配置
 
 ```json
 {
   "heartSocket.provider": "hds",
-  "heartSocket.websocketUrl": "ws://localhost:3476"
+  "heartSocket.serverPort": 8580
 }
 ```
 
-注意：这里使用 `localhost` 即可，因为 VS Code 与 HDS Overlay 运行在同一台 Mac 上。
+> **💡 提示**：如果端口 8580 被占用，可以在设置中修改 `heartSocket.serverPort`，Watch App 中的端口也需要同步修改。
 
 ---
 
-### 方案 2：HypeRate
+### 方案 2：Pulsoid — 免费替代
 
-> HypeRate 是另一款流行的心率直播工具，支持多种设备。
+> Pulsoid 免费、原生支持 Apple Watch，通过云端中转心率数据。
 
-1.  注册 [HypeRate](https://www.hyperate.io) 账号。
-2.  在 Apple Watch 上安装 HypeRate App，并在 App 中记下你的 **Session ID**（通常显示在屏幕上或 Widget URL 的末尾）。
-3.  获取 **API Token**（通常需要开发者权限或联系官方获取，或抓包查看）。
-    *   *注：如果你只能使用公开的 Widget URL，建议使用方案 4 自定义 WebSocket 尝试连接。*
-4.  配置插件：
+#### 只需 3 步：
 
-```json
-{
-  "heartSocket.provider": "hyperate",
-  "heartSocket.apiToken": "YOUR_API_TOKEN",
-  "heartSocket.sessionId": "YOUR_SESSION_ID"
-}
-```
+**① 注册 + 安装**
 
----
+1. 注册 [Pulsoid](https://pulsoid.net) 账号。
+2. 在 iPhone 上安装 [Pulsoid iOS App](https://apps.apple.com/app/pulsoid/id1524269977)（Watch App 会自动同步安装）。
+3. 在 Pulsoid App 中登录账号，打开 Watch 上的 Pulsoid App 开始心率广播。
 
-### 方案 3：Pulsoid
+**② 获取 Token**
 
-> Pulsoid 支持广泛的可穿戴设备，拥有完善的 API。
+打开 [Pulsoid Token 页面](https://pulsoid.net/ui/keys) → 生成一个 Token → 复制。
 
-1.  注册 [Pulsoid](https://pulsoid.net) 账号。
-2.  安装 Pulsoid 手机 App 并连接你的心率设备（Apple Watch 用户需要安装 Pulsoid Watch App）。
-3.  获取 **Access Token**：
-    *   前往 [Pulsoid Developer Dashboard](https://pulsoid.net/oauth2/authorize?client_id=...&response_type=token&scope=data:heart_rate:read) （需构建 OAuth 流程或使用个人 Token 生成页）。
-    *   权限 Scope 需要包含 `data:heart_rate:read`。
-4.  配置插件：
+> 💡 **更简单的方式**：在 VSCode 中按 `Cmd+Shift+P` → `Heart Socket: Switch Provider` → 选择 Pulsoid → 插件会自动引导你打开 Token 页面并输入。
 
-```json
-{
-  "heartSocket.provider": "pulsoid",
-  "heartSocket.apiToken": "YOUR_ACCESS_TOKEN"
-}
-```
+**③ 连接**
+
+`Cmd+Shift+P` → `Heart Socket: Connect` → 完成 🎉
 
 ---
 
-### 方案 4：自定义 WebSocket (通用)
+### 方案 3：HypeRate — 付费 API
 
-如果你有其他心率广播设备或自建服务，可以使用此模式。
+> ⚠️ HypeRate API 需要商业开发者权限（€1,900/年），仅适合已有 API Token 的用户。
 
-需要一个 WebSocket 服务端，推送 JSON 格式或纯文本格式的心率数据。
+如果你没有 HypeRate API Token，建议使用 **HDS（方案 1）** 或 **Pulsoid（方案 2）**。
 
-配置示例：
+已有 API Token 的用户：`Cmd+Shift+P` → `Heart Socket: Switch Provider` → 选择 HypeRate → 按引导输入 Token 和 Session ID。
 
-```json
-{
-  "heartSocket.provider": "custom",
-  "heartSocket.websocketUrl": "ws://192.168.1.10:8080",
-  // 指定 JSON 中包含心率数值的字段路径，支持 . 分隔嵌套
-  "heartSocket.heartRateJsonPath": "data.payload.bpm"
-}
-```
+---
 
-**支持的数据格式示例：**
+### 方案 4：自定义 WebSocket — 高级用户
 
-1.  **纯数字**（直接发送 Text Frame）：
-    ```
-    75
-    ```
+> 连接任意 WebSocket 服务端，适合自建心率数据服务。
 
-2.  **简单 JSON**：
-    ```json
-    { "heartRate": 75 }
-    ```
-    配置 `heartRateJsonPath`: `"heartRate"`
+`Cmd+Shift+P` → `Heart Socket: Switch Provider` → 选择自定义 WebSocket → 按引导输入 WebSocket URL 和 JSON Path。
 
-3.  **嵌套 JSON**：
-    ```json
-    {
-      "source": "apple-watch",
-      "data": {
-        "bpm": 75,
-        "energy": 120
-      }
-    }
-    ```
-    配置 `heartRateJsonPath`: `"data.bpm"`
+**支持的数据格式：**
+
+| 格式 | 示例 | JSON Path 配置 |
+|------|------|---------------|
+| 纯数字 | `75` | 留空 |
+| 简单 JSON | `{"heartRate": 75}` | `heartRate` |
+| 嵌套 JSON | `{"data": {"bpm": 75}}` | `data.bpm` |
 
 ## ⚙️ 全部配置项
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
 | `heartSocket.provider` | enum | `hds` | 数据源类型 |
-| `heartSocket.websocketUrl` | string | `ws://localhost:8080` | WebSocket 地址 |
+| `heartSocket.serverPort` | number | `8580` | HDS 模式 WebSocket Server 监听端口 |
+| `heartSocket.websocketUrl` | string | `ws://localhost:8080` | WebSocket 地址（HypeRate/Pulsoid/自定义） |
 | `heartSocket.apiToken` | string | `""` | API Token |
 | `heartSocket.sessionId` | string | `""` | Session ID (HypeRate) |
 | `heartSocket.autoConnect` | boolean | `false` | 启动时自动连接 |

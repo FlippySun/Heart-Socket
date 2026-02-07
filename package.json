@@ -85,6 +85,13 @@
           "default": false,
           "description": "VS Code 启动时自动连接心率监测"
         },
+        "heartSocket.serverPort": {
+          "type": "number",
+          "default": 8580,
+          "minimum": 1024,
+          "maximum": 65535,
+          "description": "HDS 模式 WebSocket Server 监听端口（Apple Watch 连接到此端口）"
+        },
         "heartSocket.alertHighBpm": {
           "type": "number",
           "default": 150,

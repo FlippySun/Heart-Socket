@@ -26,6 +26,7 @@ export function getConfig(): HeartSocketConfig {
     apiToken: config.get<string>('apiToken', ''),
     sessionId: config.get<string>('sessionId', ''),
     autoConnect: config.get<boolean>('autoConnect', false),
+    serverPort: config.get<number>('serverPort', 8580),
     alertHighBpm: config.get<number>('alertHighBpm', 150),
     alertLowBpm: config.get<number>('alertLowBpm', 50),
     alertCooldown: config.get<number>('alertCooldown', 60),

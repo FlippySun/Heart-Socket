@@ -11,7 +11,6 @@ import * as vscode from 'vscode';
 import { getConfig, onConfigChange } from './config';
 import { StatusBarManager } from './statusBarManager';
 import { AlertManager } from './alertManager';
-import { BaseProvider } from './providers/baseProvider';
 import { HdsProvider } from './providers/hdsProvider';
 import { HypeRateProvider } from './providers/hyperateProvider';
 import { PulsoidProvider } from './providers/pulsoidProvider';
@@ -22,13 +21,14 @@ import type {
   HeartSocketConfig,
   HeartRateStats,
   ProviderType,
+  IHeartRateProvider,
 } from './types';
 
 /** 心率历史记录最大保留数量 */
 const MAX_HISTORY_SIZE = 3600; // 约1小时（1条/秒）
 
 export class HeartRateManager {
-  private provider: BaseProvider | null = null;
+  private provider: IHeartRateProvider | null = null;
   private statusBar: StatusBarManager;
   private alertManager: AlertManager;
   private config: HeartSocketConfig;
@@ -101,56 +101,281 @@ export class HeartRateManager {
   }
 
   /**
-   * 切换数据源
+   * 切换数据源（引导式向导）
    */
   async switchProvider(): Promise<void> {
     const items: vscode.QuickPickItem[] = [
       {
-        label: 'Health Data Server (HDS)',
-        description: 'Apple Watch → WebSocket',
-        detail: 'ws://localhost:8080',
+        label: '$(heart) Health Data Server (HDS)',
+        description: '⭐ 推荐 — Apple Watch 直连',
+        detail: '插件内置 WebSocket Server，Watch 直连无需中间件，只需安装 HDS Watch App',
         picked: this.config.provider === 'hds',
       },
       {
-        label: 'HypeRate',
-        description: '需要 API Token + Session ID',
-        detail: 'wss://app.hyperate.io',
-        picked: this.config.provider === 'hyperate',
-      },
-      {
-        label: 'Pulsoid',
-        description: '需要 Access Token',
-        detail: 'wss://dev.pulsoid.net',
+        label: '$(pulse) Pulsoid',
+        description: '免费 — 需要 Access Token',
+        detail: '支持 Apple Watch / Android Watch / BLE 心率带，通过 Pulsoid 云端中转',
         picked: this.config.provider === 'pulsoid',
       },
       {
-        label: '自定义 WebSocket',
-        description: '连接到自定义 WebSocket 服务器',
-        detail: '支持 JSON Path 配置',
+        label: '$(broadcast) HypeRate',
+        description: '付费 API（€1,900/年）',
+        detail: '适合已有 HypeRate API 开发者权限的用户',
+        picked: this.config.provider === 'hyperate',
+      },
+      {
+        label: '$(plug) 自定义 WebSocket',
+        description: '高级 — 连接任意 WebSocket 服务器',
+        detail: '自建心率服务或第三方数据源，支持 JSON Path 配置',
         picked: this.config.provider === 'custom',
       },
     ];
 
     const selected = await vscode.window.showQuickPick(items, {
       placeHolder: '选择心率数据源',
-      title: 'Heart Socket - 切换数据源',
+      title: 'Heart Socket - 选择数据源',
     });
 
-    if (selected) {
-      const providerMap: Record<string, ProviderType> = {
-        'Health Data Server (HDS)': 'hds',
-        'HypeRate': 'hyperate',
-        'Pulsoid': 'pulsoid',
-        '自定义 WebSocket': 'custom',
-      };
+    if (!selected) {
+      return;
+    }
 
-      const newProvider = providerMap[selected.label];
-      if (newProvider) {
-        const wsConfig = vscode.workspace.getConfiguration('heartSocket');
-        await wsConfig.update('provider', newProvider, vscode.ConfigurationTarget.Global);
-        vscode.window.showInformationMessage(`Heart Socket: 已切换到 ${selected.label}`);
+    // 从 label 中提取 provider 名称（去掉 codicon 前缀）
+    const labelMap: Record<string, ProviderType> = {
+      '$(heart) Health Data Server (HDS)': 'hds',
+      '$(pulse) Pulsoid': 'pulsoid',
+      '$(broadcast) HypeRate': 'hyperate',
+      '$(plug) 自定义 WebSocket': 'custom',
+    };
+
+    const newProvider = labelMap[selected.label];
+    if (!newProvider) {
+      return;
+    }
+
+    // 引导式配置
+    const configured = await this.guideProviderSetup(newProvider);
+    if (!configured) {
+      return;
+    }
+
+    // 保存 provider 选择
+    const wsConfig = vscode.workspace.getConfiguration('heartSocket');
+    await wsConfig.update('provider', newProvider, vscode.ConfigurationTarget.Global);
+
+    // 询问是否立即连接
+    const action = await vscode.window.showInformationMessage(
+      `Heart Socket: 已配置 ${selected.description?.replace(/[⭐ ]/g, '').trim()}，是否立即连接？`,
+      '立即连接',
+      '稍后'
+    );
+
+    if (action === '立即连接') {
+      await this.connect();
+    }
+  }
+
+  // ─── 引导式配置向导 ─────────────────────────────
+
+  /**
+   * 根据 Provider 类型引导用户完成配置
+   * @returns true 配置完成，false 用户取消
+   */
+  private async guideProviderSetup(type: ProviderType): Promise<boolean> {
+    switch (type) {
+      case 'hds':
+        return this.guideHdsSetup();
+      case 'pulsoid':
+        return this.guidePulsoidSetup();
+      case 'hyperate':
+        return this.guideHypeRateSetup();
+      case 'custom':
+        return this.guideCustomSetup();
+      default:
+        return false;
+    }
+  }
+
+  /**
+   * HDS 引导 — 最简单，只需确认端口
+   */
+  private async guideHdsSetup(): Promise<boolean> {
+    const port = await vscode.window.showInputBox({
+      title: 'HDS — 配置监听端口',
+      prompt: '插件将在此端口启动 WebSocket Server，Apple Watch 连接到此端口',
+      value: String(this.config.serverPort),
+      placeHolder: '8580',
+      validateInput: (v) => {
+        const n = Number(v);
+        if (!Number.isInteger(n) || n < 1024 || n > 65535) {
+          return '请输入 1024-65535 之间的端口号';
+        }
+        return null;
+      },
+    });
+
+    if (port === undefined) {
+      return false;
+    }
+
+    const wsConfig = vscode.workspace.getConfiguration('heartSocket');
+    await wsConfig.update('serverPort', Number(port), vscode.ConfigurationTarget.Global);
+    return true;
+  }
+
+  /**
+   * Pulsoid 引导 — 打开 Token 页面 → 用户粘贴 Token
+   */
+  private async guidePulsoidSetup(): Promise<boolean> {
+    // 如果已有 token，询问是否使用现有的
+    if (this.config.apiToken) {
+      const keep = await vscode.window.showQuickPick(
+        [
+          { label: '使用现有 Token', description: `${this.config.apiToken.substring(0, 8)}...` },
+          { label: '重新获取 Token', description: '打开 Pulsoid 页面生成新 Token' },
+        ],
+        { title: 'Pulsoid — 已检测到 Access Token' }
+      );
+
+      if (!keep) {
+        return false;
+      }
+      if (keep.label === '使用现有 Token') {
+        return true;
       }
     }
+
+    // 打开 Pulsoid Token 页面
+    const openBrowser = await vscode.window.showInformationMessage(
+      'Pulsoid: 需要获取 Access Token。点击"获取 Token"将打开浏览器，登录后复制你的 Token。',
+      '获取 Token',
+      '我已有 Token'
+    );
+
+    if (!openBrowser) {
+      return false;
+    }
+
+    if (openBrowser === '获取 Token') {
+      await vscode.env.openExternal(vscode.Uri.parse('https://pulsoid.net/ui/keys'));
+    }
+
+    // 等待用户输入 Token
+    const token = await vscode.window.showInputBox({
+      title: 'Pulsoid — 粘贴 Access Token',
+      prompt: '从 Pulsoid 页面复制 Access Token 后粘贴到这里',
+      placeHolder: 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx',
+      password: false,
+      ignoreFocusOut: true,
+      validateInput: (v) => {
+        if (!v || v.trim().length < 10) {
+          return 'Token 不能为空';
+        }
+        return null;
+      },
+    });
+
+    if (!token) {
+      return false;
+    }
+
+    const wsConfig = vscode.workspace.getConfiguration('heartSocket');
+    await wsConfig.update('apiToken', token.trim(), vscode.ConfigurationTarget.Global);
+    return true;
+  }
+
+  /**
+   * HypeRate 引导 — 输入 API Token 和 Session ID
+   */
+  private async guideHypeRateSetup(): Promise<boolean> {
+    // 提示费用门槛
+    const proceed = await vscode.window.showWarningMessage(
+      'HypeRate API 需要商业开发者权限（€1,900/年）。如果你没有 API Token，建议使用 HDS 或 Pulsoid 方案。',
+      '我有 API Token',
+      '返回选择'
+    );
+
+    if (proceed !== '我有 API Token') {
+      return false;
+    }
+
+    // 输入 API Token
+    const token = await vscode.window.showInputBox({
+      title: 'HypeRate — 输入 API Token',
+      prompt: '从 HypeRate 开发者后台获取的 API Token',
+      value: this.config.apiToken || undefined,
+      ignoreFocusOut: true,
+      validateInput: (v) => (!v?.trim() ? 'Token 不能为空' : null),
+    });
+
+    if (!token) {
+      return false;
+    }
+
+    // 输入 Session ID
+    const sessionId = await vscode.window.showInputBox({
+      title: 'HypeRate — 输入 Session ID',
+      prompt: 'HypeRate Widget URL 末尾的几位字符（如 URL 是 app.hyperate.io/12ab，则填 12ab）',
+      value: this.config.sessionId || undefined,
+      ignoreFocusOut: true,
+      validateInput: (v) => (!v?.trim() ? 'Session ID 不能为空' : null),
+    });
+
+    if (!sessionId) {
+      return false;
+    }
+
+    const wsConfig = vscode.workspace.getConfiguration('heartSocket');
+    await wsConfig.update('apiToken', token.trim(), vscode.ConfigurationTarget.Global);
+    await wsConfig.update('sessionId', sessionId.trim(), vscode.ConfigurationTarget.Global);
+    return true;
+  }
+
+  /**
+   * 自定义 WebSocket 引导 — 输入 URL 和 JSON Path
+   */
+  private async guideCustomSetup(): Promise<boolean> {
+    // 输入 WebSocket URL
+    const url = await vscode.window.showInputBox({
+      title: '自定义 WebSocket — 输入服务器地址',
+      prompt: 'WebSocket 连接地址（ws:// 或 wss://）',
+      value: this.config.websocketUrl || 'ws://localhost:8080',
+      placeHolder: 'ws://192.168.1.10:8080',
+      ignoreFocusOut: true,
+      validateInput: (v) => {
+        if (!v?.trim()) {
+          return '地址不能为空';
+        }
+        if (!v.startsWith('ws://') && !v.startsWith('wss://')) {
+          return '地址必须以 ws:// 或 wss:// 开头';
+        }
+        return null;
+      },
+    });
+
+    if (!url) {
+      return false;
+    }
+
+    // 输入 JSON Path
+    const jsonPath = await vscode.window.showInputBox({
+      title: '自定义 WebSocket — 心率字段路径',
+      prompt: 'JSON 中心率数值的字段路径（用 . 分隔嵌套），如数据是纯数字则留空',
+      value: this.config.heartRateJsonPath || 'heartRate',
+      placeHolder: 'data.heart_rate',
+      ignoreFocusOut: true,
+    });
+
+    if (jsonPath === undefined) {
+      return false;
+    }
+
+    const wsConfig = vscode.workspace.getConfiguration('heartSocket');
+    await wsConfig.update('websocketUrl', url.trim(), vscode.ConfigurationTarget.Global);
+    if (jsonPath.trim()) {
+      await wsConfig.update('heartRateJsonPath', jsonPath.trim(), vscode.ConfigurationTarget.Global);
+    }
+    return true;
   }
 
   /**
@@ -208,7 +433,7 @@ export class HeartRateManager {
   /**
    * 创建 Provider 实例
    */
-  private createProvider(type: ProviderType): BaseProvider {
+  private createProvider(type: ProviderType): IHeartRateProvider {
     switch (type) {
       case 'hds':
         return new HdsProvider(this.config);
@@ -226,7 +451,7 @@ export class HeartRateManager {
   /**
    * 绑定 Provider 事件
    */
-  private bindProviderEvents(provider: BaseProvider): void {
+  private bindProviderEvents(provider: IHeartRateProvider): void {
     provider.on('heartRate', (data: HeartRateData) => {
       this.onHeartRate(data);
     });
@@ -277,9 +502,9 @@ export class HeartRateManager {
 
     const labels: Record<string, string> = {
       disconnected: '已断开',
-      connecting: '连接中...',
+      connecting: '启动中...',
       connected: '已连接',
-      reconnecting: '重连中...',
+      reconnecting: this.config.provider === 'hds' ? '等待设备连接...' : '重连中...',
       error: '连接错误',
     };
 
@@ -287,6 +512,14 @@ export class HeartRateManager {
 
     if (status === ConnectionStatus.Connected) {
       vscode.window.showInformationMessage(`Heart Socket: 已连接到 ${this.provider?.name}`);
+    }
+
+    // HDS Server 模式：服务启动后提示用户配置 Watch
+    if (status === ConnectionStatus.Reconnecting && this.config.provider === 'hds') {
+      const port = (this.provider as HdsProvider)?.port ?? this.config.serverPort;
+      vscode.window.showInformationMessage(
+        `Heart Socket: WebSocket Server 已启动（端口 ${port}），请在 Apple Watch HDS App 中填入 Mac 的 IP:端口并点击 Start`
+      );
     }
   }
 

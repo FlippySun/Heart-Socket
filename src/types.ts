@@ -51,6 +51,8 @@ export interface HeartSocketConfig {
   apiToken: string;
   sessionId: string;
   autoConnect: boolean;
+  /** HDS Server 模式监听端口 */
+  serverPort: number;
   alertHighBpm: number;
   alertLowBpm: number;
   alertCooldown: number;
@@ -58,6 +60,23 @@ export interface HeartSocketConfig {
   statusBarPosition: 'left' | 'right';
   showHeartbeatAnimation: boolean;
   zones: HeartRateZones;
+}
+
+/**
+ * Provider 通用接口
+ * BaseProvider（Client 模式）和 HdsProvider（Server 模式）均需实现
+ */
+export interface IHeartRateProvider {
+  readonly name: string;
+  readonly isConnected: boolean;
+  readonly status: ConnectionStatus;
+  connect(): void;
+  disconnect(): void;
+  updateConfig(config: HeartSocketConfig): void;
+  dispose(): void;
+  on(event: 'heartRate', listener: (data: HeartRateData) => void): this;
+  on(event: 'statusChange', listener: (status: ConnectionStatus) => void): this;
+  on(event: 'error', listener: (error: Error) => void): this;
 }
 
 /** WebSocket 重连配置 */
