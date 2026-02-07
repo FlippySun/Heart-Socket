@@ -53,6 +53,13 @@ export class MotionAnalyzer extends EventEmitter {
   private lastStepCount: number = 0;
   private lastHeartRate: number = 0;
 
+  // ── 编辑器活动数据（兼容回退方案） ──
+  private editorCharsPerSecond: number = 0;
+  private lastEditorEditTime: number = 0;
+
+  // ── 数据源追踪 ──
+  private hasMotionData: boolean = false; // 是否有 Motion 传感器数据（HDS）
+
   // ── 分析状态 ──
   private currentIntensity: CodingIntensityLevel = 'idle';
   private currentPosture: PostureState = 'typing';
@@ -87,11 +94,34 @@ export class MotionAnalyzer extends EventEmitter {
       return;
     }
 
+    this.hasMotionData = true; // 标记有 Motion 数据
     this.motionBuffer.push(data);
 
     // 限制缓冲区大小（滑动窗口）
     if (this.motionBuffer.length > MAX_BUFFER_SIZE) {
       this.motionBuffer.shift();
+    }
+  }
+
+  /**
+   * 输入编辑器活动数据（兼容回退方案）
+   *
+   * 当数据源不支持 Motion 传感器时使用此方法。
+   *
+   * @param charsPerSecond - 每秒字符变更数（插入+删除）
+   * @param lastEditTime - 最后编辑时间戳
+   */
+  feedTypingActivity(charsPerSecond: number, lastEditTime: number): void {
+    if (!this.config.enableMotion) {
+      return;
+    }
+
+    this.editorCharsPerSecond = charsPerSecond;
+    this.lastEditorEditTime = lastEditTime;
+
+    // 有编辑活动 → 更新活动时间（用于久坐检测）
+    if (charsPerSecond > 0) {
+      this.lastActiveTime = Date.now();
     }
   }
 
@@ -171,11 +201,14 @@ export class MotionAnalyzer extends EventEmitter {
 
   /**
    * 主分析逻辑（每秒执行一次）
+   *
+   * 支持双数据源：
+   * - HDS 模式：使用 Motion 传感器数据（加速度、姿态）
+   * - 兼容模式：使用编辑器活动数据（Pulsoid/HypeRate/Custom）
    */
   private analyze(): void {
-    if (this.motionBuffer.length === 0) {
-      return;
-    }
+    // 兼容回退：即使没有 Motion 数据，也可以基于编辑器活动分析
+    // （仅在 AI 辅助编程场景下结果会偏低）
 
     const now = Date.now();
     const deltaTime = now - this.lastAnalysisTime;
@@ -212,13 +245,23 @@ export class MotionAnalyzer extends EventEmitter {
 
   /**
    * 计算敲代码强度
-   * 基于去重力后加速度的标准差和过零率
+   * 基于去重力后加速度的标准差和过零率（有 Motion 数据时）
+   * 或基于编辑器字符变更速率（兼容回退方案）
    */
   private calculateCodingIntensity(): CodingIntensityLevel {
-    if (this.motionBuffer.length < 10) {
-      return 'idle';
+    // 优先使用 Motion 传感器数据（HDS）
+    if (this.hasMotionData && this.motionBuffer.length >= 10) {
+      return this.calculateIntensityFromMotion();
     }
 
+    // 兼容回退：使用编辑器活动数据
+    return this.calculateIntensityFromEditor();
+  }
+
+  /**
+   * 基于 Motion 传感器计算强度（HDS 模式）
+   */
+  private calculateIntensityFromMotion(): CodingIntensityLevel {
     // 计算用户加速度（去除重力分量）
     const userAccels = this.motionBuffer.map((m) => {
       const ux = m.accelerometer.x - m.gravity.x;
@@ -247,12 +290,37 @@ export class MotionAnalyzer extends EventEmitter {
   }
 
   /**
+   * 基于编辑器活动计算强度（兼容回退方案）
+   *
+   * ⚠️ 注意：此方法仅检测编辑器文本变更，无法检测 AI 代码生成、
+   * 阅读文档、浏览网页等活动，结果会偏低。
+   */
+  private calculateIntensityFromEditor(): CodingIntensityLevel {
+    const cps = this.editorCharsPerSecond;
+
+    // 字符数/秒 → 强度映射（经验阈值）
+    if (cps < 1) {
+      return 'idle';
+    } else if (cps < 5) {
+      return 'light';
+    } else if (cps < 15) {
+      return 'moderate';
+    } else if (cps < 30) {
+      return 'intense';
+    } else {
+      return 'furious';
+    }
+  }
+
+  /**
    * 检测手腕姿态
    * 基于 pitch 角判断抬手状态
+   *
+   * ⚠️ 仅在有 Motion 传感器数据时可用（HDS）
    */
   private detectPosture(): PostureState {
-    if (this.motionBuffer.length === 0) {
-      return 'typing';
+    if (!this.hasMotionData || this.motionBuffer.length === 0) {
+      return 'typing'; // 兼容回退：默认为正常打字姿势
     }
 
     // 取最近数据的平均 pitch
@@ -278,8 +346,8 @@ export class MotionAnalyzer extends EventEmitter {
     const sedentaryMs = now - this.lastActiveTime;
     const sedentaryMinutes = sedentaryMs / 60_000;
 
-    // 检测加速度活动（大幅移动）
-    if (this.motionBuffer.length > 20) {
+    // 如果有 Motion 数据，检测加速度活动（大幅移动）
+    if (this.hasMotionData && this.motionBuffer.length > 20) {
       const recentMotions = this.motionBuffer.slice(-20);
       const motionMagnitudes = recentMotions.map((m) => {
         const ux = m.accelerometer.x - m.gravity.x;
@@ -296,6 +364,9 @@ export class MotionAnalyzer extends EventEmitter {
         return;
       }
     }
+
+    // 兼容回退：无 Motion 数据时，仅依赖编辑器活动时间
+    // （lastActiveTime 在 feedTypingActivity 中更新）
 
     // 达到久坐提醒阈值
     if (sedentaryMinutes >= this.config.sedentaryMinutes) {

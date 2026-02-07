@@ -121,6 +121,31 @@
           "default": "heartRate",
           "description": "自定义数据源中心率字段的 JSON 路径（用 . 分隔，如 data.heart_rate）"
         },
+        "heartSocket.caloriesJsonPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "自定义数据源中**卡路里**字段的 JSON 路径（如 `data.calories`）。留空表示不启用。仅 Custom WebSocket 模式有效。"
+        },
+        "heartSocket.stepCountJsonPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "自定义数据源中**步数**字段的 JSON 路径（如 `data.steps`）。留空表示不启用。仅 Custom WebSocket 模式有效。"
+        },
+        "heartSocket.bloodOxygenJsonPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "自定义数据源中**血氧 (SpO2)** 字段的 JSON 路径（如 `data.spo2`）。留空表示不启用。仅 Custom WebSocket 模式有效。"
+        },
+        "heartSocket.distanceJsonPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "自定义数据源中**距离**字段的 JSON 路径（如 `data.distance`）。留空表示不启用。仅 Custom WebSocket 模式有效。"
+        },
+        "heartSocket.speedJsonPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "自定义数据源中**速度**字段的 JSON 路径（如 `data.speed`）。留空表示不启用。仅 Custom WebSocket 模式有效。"
+        },
         "heartSocket.statusBarPosition": {
           "type": "string",
           "enum": [

@@ -13,6 +13,7 @@ import { getConfig, onConfigChange } from './config';
 import { StatusBarManager } from './statusBarManager';
 import { AlertManager } from './alertManager';
 import { MotionAnalyzer } from './motionAnalyzer';
+import { EditorActivityTracker } from './editorActivityTracker';
 import { HdsProvider } from './providers/hdsProvider';
 import { HypeRateProvider } from './providers/hyperateProvider';
 import { PulsoidProvider } from './providers/pulsoidProvider';
@@ -41,6 +42,7 @@ export class HeartRateManager {
   private statusBar: StatusBarManager;
   private alertManager: AlertManager;
   private motionAnalyzer: MotionAnalyzer;
+  private editorActivityTracker: EditorActivityTracker;
   private sedentaryReminderTimer: ReturnType<typeof setTimeout> | null = null;
   private config: HeartSocketConfig;
   private disposables: vscode.Disposable[] = [];
@@ -83,10 +85,14 @@ export class HeartRateManager {
     this.statusBar = new StatusBarManager(this.config);
     this.alertManager = new AlertManager(this.config);
     this.motionAnalyzer = new MotionAnalyzer(this.config);
+    this.editorActivityTracker = new EditorActivityTracker();
     this.outputChannel = vscode.window.createOutputChannel('Heart Socket');
 
     // 绑定 MotionAnalyzer 事件
     this.bindMotionAnalyzerEvents();
+
+    // 绑定 EditorActivityTracker 事件（兼容回退方案）
+    this.bindEditorActivityEvents();
 
     // 监听配置变更
     const configDisposable = onConfigChange((newConfig) => {
@@ -120,6 +126,9 @@ export class HeartRateManager {
       this.log(`正在连接到 ${this.provider.name}...`);
       this.provider.connect();
 
+      // 启动编辑器活动追踪（用于兼容回退方案）
+      this.editorActivityTracker.start();
+
       // HDS 本地模式：启动网络变化监控
       if (this.config.provider === 'hds') {
         this.startNetworkMonitor();
@@ -136,6 +145,7 @@ export class HeartRateManager {
    */
   disconnect(): void {
     this.stopNetworkMonitor();
+    this.editorActivityTracker.stop();
     if (this.provider) {
       this.log('断开连接');
       this.provider.dispose();
@@ -546,6 +556,10 @@ export class HeartRateManager {
     if (this.motionAnalyzer) {
       this.motionAnalyzer.dispose();
     }
+    // 清理编辑器活动追踪器
+    if (this.editorActivityTracker) {
+      this.editorActivityTracker.dispose();
+    }
     // 清理久坐提醒定时器
     if (this.sedentaryReminderTimer) {
       clearTimeout(this.sedentaryReminderTimer);
@@ -626,6 +640,22 @@ export class HeartRateManager {
 
     this.motionAnalyzer.on('flowStateChange', (state: FlowState) => {
       this.onFlowStateChange(state);
+    });
+  }
+
+  /**
+   * 绑定 EditorActivityTracker 事件（兼容回退方案）
+   *
+   * 当数据源不支持 Motion 传感器时（Pulsoid/HypeRate/Custom），
+   * 使用编辑器活动数据作为兼容回退。
+   *
+   * ⚠️ 注意：此方案仅检测编辑器文本变更，无法检测 AI 代码生成、
+   * 阅读文档等活动，在 AI 辅助编程场景下结果会偏低。
+   */
+  private bindEditorActivityEvents(): void {
+    this.editorActivityTracker.on('typingActivity', (charsPerSecond: number) => {
+      const lastEditTime = this.editorActivityTracker.lastEditTime;
+      this.motionAnalyzer.feedTypingActivity(charsPerSecond, lastEditTime);
     });
   }
 

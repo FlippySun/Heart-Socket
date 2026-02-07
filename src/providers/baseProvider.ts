@@ -7,7 +7,7 @@
 import { EventEmitter } from 'events';
 import { WebSocketClient } from '../webSocketClient';
 import { ConnectionStatus } from '../types';
-import type { HeartRateData, HeartSocketConfig } from '../types';
+import type { HeartRateData, HeartSocketConfig, HealthDataType } from '../types';
 
 export abstract class BaseProvider extends EventEmitter {
   protected wsClient: WebSocketClient;
@@ -100,6 +100,25 @@ export abstract class BaseProvider extends EventEmitter {
     };
 
     this.emit('heartRate', data);
+  }
+
+  /**
+   * 派发健康数据事件（卡路里、步数、血氧等）
+   */
+  protected emitHealthData(type: HealthDataType, value: number): void {
+    this.emit('healthData', {
+      type,
+      value,
+      timestamp: Date.now(),
+      source: this.name,
+    });
+  }
+
+  /**
+   * 输出调试日志到 Output Channel
+   */
+  protected log(message: string): void {
+    this.emit('log', message);
   }
 
   // ─── 子类需要实现的方法 ───────────────────────

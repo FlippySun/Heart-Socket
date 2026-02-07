@@ -31,6 +31,12 @@ export function getConfig(): HeartSocketConfig {
     alertLowBpm: config.get<number>('alertLowBpm', 50),
     alertCooldown: config.get<number>('alertCooldown', 60),
     heartRateJsonPath: config.get<string>('heartRateJsonPath', 'heartRate'),
+    // 自定义数据源 — 健康数据 JSON Path（留空不启用）
+    caloriesJsonPath: config.get<string>('caloriesJsonPath', ''),
+    stepCountJsonPath: config.get<string>('stepCountJsonPath', ''),
+    bloodOxygenJsonPath: config.get<string>('bloodOxygenJsonPath', ''),
+    distanceJsonPath: config.get<string>('distanceJsonPath', ''),
+    speedJsonPath: config.get<string>('speedJsonPath', ''),
     statusBarPosition: config.get<'left' | 'right'>('statusBarPosition', 'left'),
     showHeartbeatAnimation: config.get<boolean>('showHeartbeatAnimation', true),
     zones: config.get<HeartRateZones>('zones', DEFAULT_ZONES),

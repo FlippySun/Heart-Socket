@@ -129,6 +129,25 @@ code --install-extension heart-socket-*.vsix
 
 `Cmd+Shift+P` → `Heart Socket: Connect` → 完成 🎉
 
+#### ⚠️ Motion 功能兼容性说明
+
+Pulsoid 数据源仅提供 **心率 BPM**，不支持 Motion 传感器数据（加速度、姿态、步数）。插件会使用 **编辑器活动（字符数/秒）** 作为兼容回退方案，让 Pulsoid 也能使用上层 Motion 功能：
+
+| 功能 | HDS (Motion) | Pulsoid (Editor 回退) | 说明 |
+|------|-------------|----------------------|------|
+| ⌨️ 敲代码强度 | ✅ 加速度传感器 | ✅ 字符数/秒 | Pulsoid 通过编辑器活动估算 |
+| 🪑 久坐提醒 | ✅ 步数+加速度 | ✅ 编辑器活动 | 基于编辑器空闲时长判断 |
+| 🖐️ 姿态感知 | ✅ Motion 传感器 | ⚠️ 默认 'typing' | Pulsoid 无姿态数据 |
+| 🎯 心流检测 | ✅ 心率+Motion | ✅ 心率+编辑器 | 可用但准确度略低 |
+| 🐟 摸鱼指数 | ✅ 完整数据 | ✅ 无姿态数据 | 仅评估打字强度+久坐 |
+| 🔋 精力水平 | ✅ 心率+Motion | ✅ 心率+编辑器 | 可用但准确度略低 |
+
+> **⚠️ 编辑器活动回退方案的局限性：**
+> - 仅检测 **VS Code 文本编辑事件**（插入/删除字符）
+> - **无法检测**：AI 代码生成、阅读文档、浏览网页、终端操作、调试交互
+> - **AI 辅助编程场景下结果会偏低**：当 AI 批量生成代码时，用户实际输入字符数很少
+> - **推荐使用 HDS（方案 1）获得最准确的 Motion 数据分析**
+
 ---
 
 ### 方案 3：HypeRate — 付费 API
@@ -139,6 +158,10 @@ code --install-extension heart-socket-*.vsix
 
 已有 API Token 的用户：`Cmd+Shift+P` → `Heart Socket: Switch Provider` → 选择 HypeRate → 按引导输入 Token 和 Session ID。
 
+#### ⚠️ Motion 功能兼容性说明
+
+HypeRate 数据源的 Motion 功能支持情况与 **Pulsoid（方案 2）** 相同，请参考方案 2 的兼容性说明。
+
 ---
 
 ### 方案 4：自定义 WebSocket — 高级用户
@@ -147,13 +170,59 @@ code --install-extension heart-socket-*.vsix
 
 `Cmd+Shift+P` → `Heart Socket: Switch Provider` → 选择自定义 WebSocket → 按引导输入 WebSocket URL 和 JSON Path。
 
+#### ⚠️ Motion 功能兼容性说明
+
+自定义 WebSocket 数据源的 Motion 功能支持情况与 **Pulsoid（方案 2）** 相同，请参考方案 2 的兼容性说明。
+
 **支持的数据格式：**
 
 | 格式 | 示例 | JSON Path 配置 |
 |------|------|---------------|
-| 纯数字 | `75` | 留空 |
+| 纯数字 | `75` | 留空（自动识别为心率） |
 | 简单 JSON | `{"heartRate": 75}` | `heartRate` |
 | 嵌套 JSON | `{"data": {"bpm": 75}}` | `data.bpm` |
+| 多字段 JSON | `{"hr": 75, "cal": 120, "steps": 5000}` | 分别配置各字段路径 |
+
+#### 🎯 多字段数据支持
+
+除了心率，Custom WebSocket 还支持从同一条 JSON 消息中提取多种健康数据，对齐 HDS 方案的数据能力：
+
+| 数据类型 | 配置项 | 示例值 | 校验规则 |
+|---------|--------|--------|----------|
+| ❤️ 心率 | `heartRateJsonPath` | `"data.hr"` | 20-250 BPM |
+| 🔥 卡路里 | `caloriesJsonPath` | `"data.calories"` | ≥ 0 |
+| 👟 步数 | `stepCountJsonPath` | `"data.steps"` | ≥ 0 且为整数 |
+| 🩺 血氧 | `bloodOxygenJsonPath` | `"data.spo2"` | 0-100 |
+| 📏 距离 | `distanceJsonPath` | `"data.distance"` | ≥ 0 |
+| 🏃 速度 | `speedJsonPath` | `"data.speed"` | ≥ 0 |
+
+**配置示例：**
+
+```json
+{
+  "heartSocket.provider": "custom",
+  "heartSocket.websocketUrl": "ws://192.168.1.100:9090",
+  "heartSocket.heartRateJsonPath": "data.heartRate",
+  "heartSocket.caloriesJsonPath": "data.calories",
+  "heartSocket.stepCountJsonPath": "data.steps",
+  "heartSocket.bloodOxygenJsonPath": "data.spo2"
+}
+```
+
+对应的 WebSocket 消息格式：
+
+```json
+{
+  "data": {
+    "heartRate": 75,
+    "calories": 120,
+    "steps": 5000,
+    "spo2": 98
+  }
+}
+```
+
+> 💡 **提示**：所有健康数据字段配置项默认为空，留空表示不启用该字段提取。只需配置你的 WebSocket 服务端实际发送的字段即可。
 
 ## ⚙️ 全部配置项
 
@@ -168,7 +237,12 @@ code --install-extension heart-socket-*.vsix
 | `heartSocket.alertHighBpm` | number | `150` | 高心率告警阈值 |
 | `heartSocket.alertLowBpm` | number | `50` | 低心率告警阈值 |
 | `heartSocket.alertCooldown` | number | `60` | 告警冷却时间（秒） |
-| `heartSocket.heartRateJsonPath` | string | `heartRate` | 自定义 JSON 路径 |
+| `heartSocket.heartRateJsonPath` | string | `heartRate` | 自定义数据源心率字段 JSON 路径 |
+| `heartSocket.caloriesJsonPath` | string | `""` | 自定义数据源卡路里字段 JSON 路径（留空不启用） |
+| `heartSocket.stepCountJsonPath` | string | `""` | 自定义数据源步数字段 JSON 路径（留空不启用） |
+| `heartSocket.bloodOxygenJsonPath` | string | `""` | 自定义数据源血氧字段 JSON 路径（留空不启用） |
+| `heartSocket.distanceJsonPath` | string | `""` | 自定义数据源距离字段 JSON 路径（留空不启用） |
+| `heartSocket.speedJsonPath` | string | `""` | 自定义数据源速度字段 JSON 路径（留空不启用） |
 | `heartSocket.statusBarPosition` | enum | `left` | 状态栏位置 |
 | `heartSocket.showHeartbeatAnimation` | boolean | `true` | 心跳动画 |
 | `heartSocket.zones` | object | `{rest:60,...}` | 心率区间阈值 |
@@ -207,13 +281,14 @@ src/
 ├── types.ts              # 类型定义
 ├── config.ts             # 配置管理
 ├── webSocketClient.ts    # WebSocket 客户端（含自动重连）
-├── motionAnalyzer.ts     # Motion 数据深度分析引擎
+├── motionAnalyzer.ts     # Motion 数据深度分析引擎（双数据源）
+├── editorActivityTracker.ts  # 编辑器活动追踪（Motion 兼容回退方案）
 ├── providers/
-│   ├── baseProvider.ts   # 抽象基类
-│   ├── hdsProvider.ts    # Health Data Server（本地直连 + Motion 数据解析）
+│   ├── baseProvider.ts   # 抽象基类（heartRate + healthData + log）
+│   ├── hdsProvider.ts    # Health Data Server（本地直连 + Motion + 健康数据）
 │   ├── hyperateProvider.ts # HypeRate (Phoenix Channel)
 │   ├── pulsoidProvider.ts  # Pulsoid
-│   └── customProvider.ts   # 自定义 WebSocket
+│   └── customProvider.ts   # 自定义 WebSocket（多字段 JSON Path 提取）
 ├── statusBarManager.ts   # 状态栏 UI（心率 + 敲代码强度）
 ├── alertManager.ts       # 告警通知
 └── heartRateManager.ts   # 核心管理器（协调 Motion 分析器）

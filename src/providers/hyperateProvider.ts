@@ -50,6 +50,7 @@ export class HypeRateProvider extends BaseProvider {
       ref: this.nextRef(),
     });
     this.wsClient.send(joinMsg);
+    this.log(`正在加入 HypeRate 频道 hr:${sessionId}...`);
 
     // 启动 Phoenix heartbeat（每30秒）
     this.startPhoenixHeartbeat();
@@ -69,11 +70,12 @@ export class HypeRateProvider extends BaseProvider {
 
       // 处理 join 回复
       if (msg.event === 'phx_reply' && msg.payload?.status === 'ok') {
-        // 成功加入频道
+        this.log('已成功加入 HypeRate 频道');
       }
 
       // 处理错误
       if (msg.event === 'phx_error' || msg.payload?.status === 'error') {
+        this.log(`HypeRate 频道错误: ${JSON.stringify(msg.payload)}`);
         this.emit('error', new Error(`HypeRate channel error: ${JSON.stringify(msg.payload)}`));
       }
     } catch {

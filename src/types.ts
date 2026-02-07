@@ -171,6 +171,16 @@ export interface HeartSocketConfig {
   alertLowBpm: number;
   alertCooldown: number;
   heartRateJsonPath: string;
+  /** 自定义数据源 — 卡路里字段 JSON 路径（留空不启用） */
+  caloriesJsonPath: string;
+  /** 自定义数据源 — 步数字段 JSON 路径（留空不启用） */
+  stepCountJsonPath: string;
+  /** 自定义数据源 — 血氧字段 JSON 路径（留空不启用） */
+  bloodOxygenJsonPath: string;
+  /** 自定义数据源 — 距离字段 JSON 路径（留空不启用） */
+  distanceJsonPath: string;
+  /** 自定义数据源 — 速度字段 JSON 路径（留空不启用） */
+  speedJsonPath: string;
   statusBarPosition: 'left' | 'right';
   showHeartbeatAnimation: boolean;
   zones: HeartRateZones;
