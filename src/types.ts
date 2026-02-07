@@ -12,6 +12,39 @@ export interface HeartRateData {
   source: string;
 }
 
+/** 健康数据（HDS 扩展数据） */
+export interface HealthData {
+  /** 数据类型 */
+  type: HealthDataType;
+  /** 数值 */
+  value: number;
+  /** 时间戳 (ms) */
+  timestamp: number;
+  /** 数据来源 */
+  source: string;
+}
+
+/** 健康数据类型 */
+export type HealthDataType =
+  | 'calories'
+  | 'stepCount'
+  | 'distance'
+  | 'speed'
+  | 'bloodOxygen'
+  | 'bodyMass'
+  | 'bmi';
+
+/** 健康数据快照（用于 tooltip 显示） */
+export interface HealthSnapshot {
+  calories?: number;
+  stepCount?: number;
+  distance?: number;
+  speed?: number;
+  bloodOxygen?: number;
+  bodyMass?: number;
+  bmi?: number;
+}
+
 /** 连接状态 */
 export enum ConnectionStatus {
   /** 未连接 */
@@ -75,8 +108,10 @@ export interface IHeartRateProvider {
   updateConfig(config: HeartSocketConfig): void;
   dispose(): void;
   on(event: 'heartRate', listener: (data: HeartRateData) => void): this;
+  on(event: 'healthData', listener: (data: HealthData) => void): this;
   on(event: 'statusChange', listener: (status: ConnectionStatus) => void): this;
   on(event: 'error', listener: (error: Error) => void): this;
+  on(event: 'log', listener: (message: string) => void): this;
 }
 
 /** WebSocket 重连配置 */

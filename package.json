@@ -19,7 +19,6 @@
     "websocket",
     "bpm"
   ],
-  "icon": "media/icon.png",
   "activationEvents": [
     "onStartupFinished"
   ],

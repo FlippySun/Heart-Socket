@@ -8,6 +8,7 @@
  * - 处理配置变更
  */
 import * as vscode from 'vscode';
+import * as os from 'os';
 import { getConfig, onConfigChange } from './config';
 import { StatusBarManager } from './statusBarManager';
 import { AlertManager } from './alertManager';
@@ -18,6 +19,8 @@ import { CustomProvider } from './providers/customProvider';
 import { ConnectionStatus } from './types';
 import type {
   HeartRateData,
+  HealthData,
+  HealthSnapshot,
   HeartSocketConfig,
   HeartRateStats,
   ProviderType,
@@ -46,6 +49,9 @@ export class HeartRateManager {
   };
   private sessionStartTime: number = 0;
   private bpmSum: number = 0;
+
+  // 健康数据快照（最新值）
+  private healthSnapshot: HealthSnapshot = {};
 
   // 输出通道（日志）
   private outputChannel: vscode.OutputChannel;
@@ -456,12 +462,20 @@ export class HeartRateManager {
       this.onHeartRate(data);
     });
 
+    provider.on('healthData', (data: HealthData) => {
+      this.onHealthData(data);
+    });
+
     provider.on('statusChange', (status: ConnectionStatus) => {
       this.onStatusChange(status);
     });
 
     provider.on('error', (error: Error) => {
       this.log(`错误: ${error.message}`);
+    });
+
+    provider.on('log', (msg: string) => {
+      this.log(msg);
     });
   }
 
@@ -484,14 +498,27 @@ export class HeartRateManager {
       this.stats.history.shift();
     }
 
-    // 更新状态栏
-    this.statusBar.updateHeartRate(data);
+    // 更新状态栏（传递健康数据快照）
+    this.statusBar.updateHeartRate(data, this.healthSnapshot);
 
     // 检查告警
     this.alertManager.check(data);
 
     // 日志
     this.log(`❤️ ${data.bpm} BPM (${data.source})`);
+  }
+
+  /**
+   * 处理健康数据（卡路里、步数、血氧等）
+   */
+  private onHealthData(data: HealthData): void {
+    // 更新健康数据快照
+    this.healthSnapshot[data.type] = data.value;
+
+    // 刷新状态栏 tooltip（携带最新健康数据）
+    if (this.stats.current > 0) {
+      this.statusBar.updateHealthSnapshot(this.healthSnapshot);
+    }
   }
 
   /**
@@ -517,9 +544,22 @@ export class HeartRateManager {
     // HDS Server 模式：服务启动后提示用户配置 Watch
     if (status === ConnectionStatus.Reconnecting && this.config.provider === 'hds') {
       const port = (this.provider as HdsProvider)?.port ?? this.config.serverPort;
-      vscode.window.showInformationMessage(
-        `Heart Socket: WebSocket Server 已启动（端口 ${port}），请在 Apple Watch HDS App 中填入 Mac 的 IP:端口并点击 Start`
-      );
+      const hostname = this.getLocalHostname();
+      const ip = this.getLocalIp();
+
+      const localUrl = `http://${hostname}.local:${port}/`;
+      const ipUrl = ip ? `http://${ip}:${port}/` : null;
+
+      const lines = [
+        `Heart Socket: 服务已启动（端口 ${port}）`,
+        `\n推荐地址（切换WiFi无需修改）: ${localUrl}`,
+      ];
+      if (ipUrl) {
+        lines.push(`备用地址: ${ipUrl}`);
+      }
+      lines.push(`\n请在 Watch HDS App 的 Overlay IDs 中输入以上地址并点击 Start`);
+
+      vscode.window.showInformationMessage(lines.join('\n'));
     }
   }
 
@@ -558,6 +598,7 @@ export class HeartRateManager {
       history: [],
     };
     this.bpmSum = 0;
+    this.healthSnapshot = {};
     this.sessionStartTime = Date.now();
     this.alertManager.reset();
   }
@@ -568,6 +609,34 @@ export class HeartRateManager {
   private log(message: string): void {
     const time = new Date().toLocaleTimeString();
     this.outputChannel.appendLine(`[${time}] ${message}`);
+  }
+
+  /**
+   * 获取本机 Bonjour hostname（去掉 .local 后缀）
+   */
+  private getLocalHostname(): string {
+    let hostname = os.hostname();
+    // macOS 的 os.hostname() 可能带 .local 后缀
+    if (hostname.endsWith('.local')) {
+      hostname = hostname.slice(0, -'.local'.length);
+    }
+    return hostname;
+  }
+
+  /**
+   * 获取本机局域网 IPv4 地址
+   */
+  private getLocalIp(): string | null {
+    const interfaces = os.networkInterfaces();
+    for (const name of Object.keys(interfaces)) {
+      for (const iface of interfaces[name] ?? []) {
+        // 过滤：IPv4、非内部地址
+        if (iface.family === 'IPv4' && !iface.internal) {
+          return iface.address;
+        }
+      }
+    }
+    return null;
   }
 
   /**
@@ -595,6 +664,50 @@ export class HeartRateManager {
     const durationStr = this.formatDuration(duration);
     const minDisplay = min === Infinity ? '--' : min;
     const maxDisplay = max === -Infinity ? '--' : max;
+
+    // 构建健康数据卡片
+    const healthCards: string[] = [];
+    if (this.healthSnapshot.calories !== undefined) {
+      healthCards.push(`
+    <div class="stat-card">
+      <div class="value">${this.healthSnapshot.calories}</div>
+      <div class="label">🔥 卡路里 (kcal)</div>
+    </div>`);
+    }
+    if (this.healthSnapshot.stepCount !== undefined) {
+      healthCards.push(`
+    <div class="stat-card">
+      <div class="value">${this.healthSnapshot.stepCount}</div>
+      <div class="label">👟 步数</div>
+    </div>`);
+    }
+    if (this.healthSnapshot.bloodOxygen !== undefined) {
+      healthCards.push(`
+    <div class="stat-card">
+      <div class="value">${this.healthSnapshot.bloodOxygen}%</div>
+      <div class="label">🩸 血氧</div>
+    </div>`);
+    }
+    if (this.healthSnapshot.distance !== undefined) {
+      healthCards.push(`
+    <div class="stat-card">
+      <div class="value">${this.healthSnapshot.distance.toFixed(2)}</div>
+      <div class="label">📏 距离 (km)</div>
+    </div>`);
+    }
+    if (this.healthSnapshot.speed !== undefined) {
+      healthCards.push(`
+    <div class="stat-card">
+      <div class="value">${this.healthSnapshot.speed.toFixed(1)}</div>
+      <div class="label">⚡ 速度 (km/h)</div>
+    </div>`);
+    }
+
+    const healthSection = healthCards.length > 0
+      ? `<h2 style="text-align:center;margin-top:32px;margin-bottom:16px;opacity:0.7;">📊 健康数据</h2>
+  <div class="stats-grid">${healthCards.join('')}
+  </div>`
+      : '';
 
     return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -688,6 +801,7 @@ export class HeartRateManager {
       <div class="label">监测时长</div>
     </div>
   </div>
+  ${healthSection}
   <div class="footer">
     Heart Socket - Apple Watch Heart Rate Monitor for VS Code
   </div>

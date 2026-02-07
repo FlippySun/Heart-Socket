@@ -13,7 +13,18 @@
 import { EventEmitter } from 'events';
 import { HeartSocketServer } from '../webSocketServer';
 import { ConnectionStatus } from '../types';
-import type { HeartRateData, HeartSocketConfig } from '../types';
+import type { HeartRateData, HealthData, HealthDataType, HeartSocketConfig } from '../types';
+
+/** HDS key → HealthDataType 映射 */
+const HEALTH_KEY_MAP: Record<string, HealthDataType> = {
+  calories: 'calories',
+  stepcount: 'stepCount',
+  distance: 'distance',
+  speed: 'speed',
+  bloodoxygen: 'bloodOxygen',
+  bodymass: 'bodyMass',
+  bmi: 'bmi',
+};
 
 export class HdsProvider extends EventEmitter {
   readonly name = 'Health Data Server';
@@ -40,6 +51,11 @@ export class HdsProvider extends EventEmitter {
     // 处理接收到的消息
     this.server.on('message', (data: string) => {
       this.onMessage(data);
+    });
+
+    // 转发日志
+    this.server.on('log', (msg: string) => {
+      this.emit('log', msg);
     });
   }
 
@@ -93,7 +109,41 @@ export class HdsProvider extends EventEmitter {
         return;
       }
 
-      // 尝试解析为 JSON
+      // ── HDS 原生格式：key:value 文本（如 "heartRate:75"、"calories:120"）──
+      if (trimmed.includes(':') && !trimmed.startsWith('{')) {
+        const colonIndex = trimmed.indexOf(':');
+        const key = trimmed.substring(0, colonIndex).trim().toLowerCase();
+        const value = trimmed.substring(colonIndex + 1).trim();
+
+        // 心率数据
+        if (key === 'heartrate' || key === 'hr' || key === 'bpm') {
+          const bpm = Number(value);
+          if (Number.isFinite(bpm)) {
+            this.emitHeartRate(bpm);
+          }
+          return;
+        }
+
+        // motion 数据（加速度传感器，非常频繁，忽略不处理）
+        if (key === 'motion') {
+          return;
+        }
+
+        // 其他健康数据（calories, stepCount, distance, speed, bloodOxygen, bodyMass, bmi）
+        const healthType = HEALTH_KEY_MAP[key];
+        if (healthType) {
+          const num = Number(value);
+          if (Number.isFinite(num)) {
+            this.emitHealthData(healthType, num);
+          }
+          return;
+        }
+
+        // 未知 key，静默忽略
+        return;
+      }
+
+      // ── JSON 格式（兼容自定义实现）──
       const json = JSON.parse(trimmed);
 
       // 支持多种可能的字段名
@@ -125,5 +175,16 @@ export class HdsProvider extends EventEmitter {
     };
 
     this.emit('heartRate', data);
+  }
+
+  private emitHealthData(type: HealthDataType, value: number): void {
+    const data: HealthData = {
+      type,
+      value,
+      timestamp: Date.now(),
+      source: this.name,
+    };
+
+    this.emit('healthData', data);
   }
 }

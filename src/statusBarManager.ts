@@ -11,6 +11,7 @@ import * as vscode from 'vscode';
 import { ConnectionStatus } from './types';
 import type {
   HeartRateData,
+  HealthSnapshot,
   HeartRateZoneName,
   HeartSocketConfig,
 } from './types';
@@ -46,6 +47,7 @@ export class StatusBarManager {
   private lastZone: HeartRateZoneName = 'normal';
   private connectionStatus: ConnectionStatus = ConnectionStatus.Disconnected;
   private config: HeartSocketConfig;
+  private healthSnapshot: HealthSnapshot = {};
 
   /** 节流：最小更新间隔 (ms) */
   private lastUpdateTime: number = 0;
@@ -74,10 +76,24 @@ export class StatusBarManager {
   /**
    * 更新心率显示
    */
-  updateHeartRate(data: HeartRateData): void {
+  updateHeartRate(data: HeartRateData, healthSnapshot?: HealthSnapshot): void {
     this.lastBpm = data.bpm;
     this.lastZone = this.getZone(data.bpm);
+    if (healthSnapshot) {
+      this.healthSnapshot = healthSnapshot;
+    }
     this.throttledUpdate();
+  }
+
+  /**
+   * 更新健康数据快照（仅刷新 tooltip）
+   */
+  updateHealthSnapshot(snapshot: HealthSnapshot): void {
+    this.healthSnapshot = snapshot;
+    // 只更新 tooltip，不触发主文本重渲染
+    if (this.lastBpm > 0) {
+      this.statusBarItem.tooltip = this.buildTooltip();
+    }
   }
 
   /**
@@ -179,11 +195,53 @@ export class StatusBarManager {
       `━━━━━━━━━━━━━━━━━━━━`,
       `💓 当前心率: ${this.lastBpm} BPM`,
       `📊 心率区间: ${zoneLabel}`,
-      `🔗 连接状态: ${this.getStatusLabel()}`,
-      ``,
-      `点击断开连接`,
     ];
+
+    // 添加健康数据
+    const healthLines = this.buildHealthLines();
+    if (healthLines.length > 0) {
+      lines.push(`━━━━━━━━━━━━━━━━━━━━`);
+      lines.push(...healthLines);
+    }
+
+    lines.push(`━━━━━━━━━━━━━━━━━━━━`);
+    lines.push(`🔗 连接状态: ${this.getStatusLabel()}`);
+    lines.push(``);
+    lines.push(`点击断开连接`);
+
     return lines.join('\n');
+  }
+
+  /**
+   * 构建健康数据行
+   */
+  private buildHealthLines(): string[] {
+    const lines: string[] = [];
+    const s = this.healthSnapshot;
+
+    if (s.calories !== undefined) {
+      lines.push(`🔥 卡路里: ${s.calories} kcal`);
+    }
+    if (s.stepCount !== undefined) {
+      lines.push(`👟 步数: ${s.stepCount}`);
+    }
+    if (s.bloodOxygen !== undefined) {
+      lines.push(`🩸 血氧: ${s.bloodOxygen}%`);
+    }
+    if (s.distance !== undefined) {
+      lines.push(`📏 距离: ${s.distance.toFixed(2)} km`);
+    }
+    if (s.speed !== undefined) {
+      lines.push(`⚡ 速度: ${s.speed.toFixed(1)} km/h`);
+    }
+    if (s.bodyMass !== undefined) {
+      lines.push(`⚖️ 体重: ${s.bodyMass} kg`);
+    }
+    if (s.bmi !== undefined) {
+      lines.push(`📐 BMI: ${s.bmi.toFixed(1)}`);
+    }
+
+    return lines;
   }
 
   private getStatusLabel(): string {
