@@ -6,6 +6,7 @@
  * - 根据心率区间自动变色
  * - 心跳动画效果
  * - 连接状态指示
+ * - 敲代码强度指示器（Motion）
  */
 import * as vscode from 'vscode';
 import { ConnectionStatus } from './types';
@@ -14,6 +15,8 @@ import type {
   HealthSnapshot,
   HeartRateZoneName,
   HeartSocketConfig,
+  CodingIntensityLevel,
+  MotionAnalysisResult,
 } from './types';
 
 /** 心率区间对应的颜色主题 */
@@ -39,6 +42,23 @@ const ZONE_LABELS: Record<HeartRateZoneName, string> = {
 /** 心跳动画图标交替 */
 const HEART_ICONS = ['♥', '♡'];
 
+/** 敲代码强度对应的图标和描述 */
+const CODING_INTENSITY_ICONS: Record<CodingIntensityLevel, string> = {
+  idle: '💤',
+  light: '⌨️',
+  moderate: '⚡',
+  intense: '🔥',
+  furious: '🚀',
+};
+
+const CODING_INTENSITY_LABELS: Record<CodingIntensityLevel, string> = {
+  idle: '空闲',
+  light: '轻度打字',
+  moderate: '中等打字',
+  intense: '密集打字',
+  furious: '疯狂打字',
+};
+
 export class StatusBarManager {
   private statusBarItem: vscode.StatusBarItem;
   private animationTimer: ReturnType<typeof setInterval> | null = null;
@@ -48,6 +68,10 @@ export class StatusBarManager {
   private connectionStatus: ConnectionStatus = ConnectionStatus.Disconnected;
   private config: HeartSocketConfig;
   private healthSnapshot: HealthSnapshot = {};
+
+  // Motion 相关状态
+  private codingIntensity: CodingIntensityLevel = 'idle';
+  private motionAnalysis: MotionAnalysisResult | null = null;
 
   /** 节流：最小更新间隔 (ms) */
   private lastUpdateTime: number = 0;
@@ -68,7 +92,7 @@ export class StatusBarManager {
       config.statusBarPosition === 'left' ? 100 : 0
     );
 
-    this.statusBarItem.command = 'heartSocket.connect';
+    this.statusBarItem.command = 'heartSocket.quickActions';
     this.showDisconnected();
     this.statusBarItem.show();
   }
@@ -134,6 +158,25 @@ export class StatusBarManager {
   }
 
   /**
+   * 更新敲代码强度
+   */
+  updateCodingIntensity(level: CodingIntensityLevel): void {
+    this.codingIntensity = level;
+    this.throttledUpdate();
+  }
+
+  /**
+   * 更新 Motion 分析结果
+   */
+  updateMotionAnalysis(result: MotionAnalysisResult): void {
+    this.motionAnalysis = result;
+    // 仅更新 tooltip，不触发主文本重渲染
+    if (this.lastBpm > 0) {
+      this.statusBarItem.tooltip = this.buildTooltip();
+    }
+  }
+
+  /**
    * 更新配置
    */
   updateConfig(config: HeartSocketConfig): void {
@@ -185,7 +228,14 @@ export class StatusBarManager {
       ? HEART_ICONS[this.animationFrame % HEART_ICONS.length]
       : HEART_ICONS[0];
 
-    this.statusBarItem.text = `${icon} ${this.lastBpm} BPM`;
+    // 主显示：心率 + 敲代码强度（可选）
+    let text = `${icon} ${this.lastBpm} BPM`;
+    if (this.config.showCodingIntensity && this.codingIntensity !== 'idle') {
+      const intensityIcon = CODING_INTENSITY_ICONS[this.codingIntensity];
+      text += ` ${intensityIcon}`;
+    }
+
+    this.statusBarItem.text = text;
     this.statusBarItem.color = ZONE_COLORS[this.lastZone];
     this.statusBarItem.tooltip = this.buildTooltip();
   }
@@ -201,6 +251,51 @@ export class StatusBarManager {
       `💓 当前心率: ${this.lastBpm} BPM`,
       `📊 心率区间: ${zoneLabel}`,
     ];
+
+    // 添加敲代码强度
+    if (this.config.showCodingIntensity) {
+      const intensityIcon = CODING_INTENSITY_ICONS[this.codingIntensity];
+      const intensityLabel = CODING_INTENSITY_LABELS[this.codingIntensity];
+      lines.push(`⌨️ 打字强度: ${intensityIcon} ${intensityLabel}`);
+    }
+
+    // 添加 Motion 分析结果
+    if (this.motionAnalysis) {
+      if (this.config.showFlowState && this.motionAnalysis.flowState.active) {
+        const flowMinutes = Math.floor(this.motionAnalysis.flowState.duration / 60000);
+        lines.push(
+          `🎯 心流状态: 已持续 ${flowMinutes} 分钟`
+        );
+      }
+
+      if (this.config.showSlackingIndex) {
+        const slackingEmoji =
+          this.motionAnalysis.slackingIndex < 30
+            ? '🌟'
+            : this.motionAnalysis.slackingIndex < 50
+              ? '👍'
+              : this.motionAnalysis.slackingIndex < 70
+                ? '🤔'
+                : '🐟';
+        lines.push(
+          `${slackingEmoji} 摸鱼指数: ${Math.round(this.motionAnalysis.slackingIndex)}/100`
+        );
+      }
+
+      // 精力水平
+      lines.push(
+        `🔋 精力水平: ${Math.round(this.motionAnalysis.energyLevel)}%`
+      );
+
+      // 姿态状态
+      const postureEmoji =
+        this.motionAnalysis.posture === 'typing'
+          ? '⌨️'
+          : this.motionAnalysis.posture === 'raised'
+            ? '🖐️'
+            : '🤔';
+      lines.push(`${postureEmoji} 姿态: ${this.motionAnalysis.posture}`);
+    }
 
     // 添加健康数据
     const healthLines = this.buildHealthLines();

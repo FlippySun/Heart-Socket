@@ -54,20 +54,18 @@
         "heartSocket.provider": {
           "type": "string",
           "enum": [
-            "hds-cloud",
             "hds",
             "hyperate",
             "pulsoid",
             "custom"
           ],
           "enumDescriptions": [
-            "HDS Cloud (Apple Watch → 云端 → VSCode，Cloud ID 永久不变)",
-            "Health Data Server (Apple Watch → 本地 WiFi → VSCode)",
+            "Health Data Server (推荐，Apple Watch → 本地 WiFi → VSCode，零配置)",
             "HypeRate (需要 API Token + Session ID)",
             "Pulsoid (需要 Access Token)",
             "自定义 WebSocket 服务器"
           ],
-          "default": "hds-cloud",
+          "default": "hds",
           "description": "心率数据源类型"
         },
         "heartSocket.websocketUrl": {
@@ -164,6 +162,40 @@
               "description": "高强度上限（超过此值为极高强度）"
             }
           }
+        },
+        "heartSocket.enableMotion": {
+          "type": "boolean",
+          "default": true,
+          "description": "启用 Motion 传感器数据分析（需 HDS 支持）"
+        },
+        "heartSocket.sedentaryMinutes": {
+          "type": "number",
+          "default": 45,
+          "minimum": 10,
+          "maximum": 120,
+          "description": "久坐提醒阈值（分钟）"
+        },
+        "heartSocket.postureAlertSeconds": {
+          "type": "number",
+          "default": 30,
+          "minimum": 10,
+          "maximum": 300,
+          "description": "不良姿态提醒阈值（秒）"
+        },
+        "heartSocket.showCodingIntensity": {
+          "type": "boolean",
+          "default": true,
+          "description": "在状态栏显示敲代码强度图标"
+        },
+        "heartSocket.showFlowState": {
+          "type": "boolean",
+          "default": true,
+          "description": "在 tooltip 显示心流状态"
+        },
+        "heartSocket.showSlackingIndex": {
+          "type": "boolean",
+          "default": true,
+          "description": "在 tooltip 显示摸鱼指数"
         }
       }
     }

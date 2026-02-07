@@ -34,6 +34,87 @@ export type HealthDataType =
   | 'bodyMass'
   | 'bmi';
 
+// ─── Motion 数据类型 ─────────────────────────────
+
+/** 三维向量 */
+export interface Vector3 {
+  x: number;
+  y: number;
+  z: number;
+}
+
+/** 姿态欧拉角 */
+export interface AttitudeData {
+  /** 翻滚角 (rad) — 左右倾斜 */
+  roll: number;
+  /** 俯仰角 (rad) — 前后倾斜（抬手/放下） */
+  pitch: number;
+  /** 偏航角 (rad) — 水平旋转 */
+  yaw: number;
+}
+
+/** HDS Motion 原始数据 */
+export interface MotionData {
+  /** 原始加速度（含重力，单位 g） */
+  accelerometer: Vector3;
+  /** 重力向量（单位 g） */
+  gravity: Vector3;
+  /** 陀螺仪角速度 (rad/s) */
+  rotationRate: Vector3;
+  /** 姿态欧拉角 (rad) */
+  attitude: AttitudeData;
+  /** 时间戳 (ms) */
+  timestamp: number;
+}
+
+/** 敲代码强度等级 */
+export type CodingIntensityLevel = 'idle' | 'light' | 'moderate' | 'intense' | 'furious';
+
+/** 手腕姿态状态 */
+export type PostureState = 'typing' | 'raised' | 'slacking';
+
+/** 心流状态 */
+export interface FlowState {
+  /** 是否处于心流状态 */
+  active: boolean;
+  /** 心流持续时间 (ms) */
+  duration: number;
+}
+
+/** Motion 分析结果（聚合输出） */
+export interface MotionAnalysisResult {
+  /** 敲代码强度 */
+  codingIntensity: CodingIntensityLevel;
+  /** 手腕姿态 */
+  posture: PostureState;
+  /** 心流状态 */
+  flowState: FlowState;
+  /** 摸鱼指数 (0-100) */
+  slackingIndex: number;
+  /** 精力水平 (0-100) */
+  energyLevel: number;
+  /** 抬手持续时间 (ms)，仅 posture=raised/slacking 时有值 */
+  raisedDuration: number;
+  /** 久坐持续时间 (ms) */
+  sedentaryDuration: number;
+}
+
+/** Motion 功能配置 */
+export interface MotionConfig {
+  /** 启用 Motion 功能 */
+  enableMotion: boolean;
+  /** 久坐提醒时间（分钟） */
+  sedentaryMinutes: number;
+  /** 抬手摸鱼提醒阈值（秒） */
+  postureAlertSeconds: number;
+  /** 显示敲代码强度 */
+  showCodingIntensity: boolean;
+  /** 显示心流状态 */
+  showFlowState: boolean;
+  /** 显示摸鱼指数 */
+  showSlackingIndex: boolean;
+}
+
 /** 健康数据快照（用于 tooltip 显示） */
 export interface HealthSnapshot {
   calories?: number;
@@ -60,7 +141,7 @@ export enum ConnectionStatus {
 }
 
 /** 数据源类型 */
-export type ProviderType = 'hds' | 'hds-cloud' | 'hyperate' | 'pulsoid' | 'custom';
+export type ProviderType = 'hds' | 'hyperate' | 'pulsoid' | 'custom';
 
 /** 心率区间 */
 export interface HeartRateZones {
@@ -93,6 +174,13 @@ export interface HeartSocketConfig {
   statusBarPosition: 'left' | 'right';
   showHeartbeatAnimation: boolean;
   zones: HeartRateZones;
+  // Motion 功能配置
+  enableMotion: boolean;
+  sedentaryMinutes: number;
+  postureAlertSeconds: number;
+  showCodingIntensity: boolean;
+  showFlowState: boolean;
+  showSlackingIndex: boolean;
 }
 
 /**
@@ -109,6 +197,7 @@ export interface IHeartRateProvider {
   dispose(): void;
   on(event: 'heartRate', listener: (data: HeartRateData) => void): this;
   on(event: 'healthData', listener: (data: HealthData) => void): this;
+  on(event: 'motionData', listener: (data: MotionData) => void): this;
   on(event: 'statusChange', listener: (status: ConnectionStatus) => void): this;
   on(event: 'error', listener: (error: Error) => void): this;
   on(event: 'log', listener: (message: string) => void): this;

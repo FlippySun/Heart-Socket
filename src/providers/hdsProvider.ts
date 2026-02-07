@@ -13,7 +13,7 @@
 import { EventEmitter } from 'events';
 import { HeartSocketServer } from '../webSocketServer';
 import { ConnectionStatus } from '../types';
-import type { HeartRateData, HealthData, HealthDataType, HeartSocketConfig } from '../types';
+import type { HeartRateData, HealthData, HealthDataType, MotionData, Vector3, AttitudeData, HeartSocketConfig } from '../types';
 
 /** HDS key → HealthDataType 映射 */
 const HEALTH_KEY_MAP: Record<string, HealthDataType> = {
@@ -124,8 +124,9 @@ export class HdsProvider extends EventEmitter {
           return;
         }
 
-        // motion 数据（加速度传感器，非常频繁，忽略不处理）
+        // motion 数据（加速度传感器等，高频）
         if (key === 'motion') {
+          this.parseMotionData(value);
           return;
         }
 
@@ -186,5 +187,93 @@ export class HdsProvider extends EventEmitter {
     };
 
     this.emit('healthData', data);
+  }
+
+  // ─── Motion 数据解析 ────────────────────────────
+
+  /**
+   * 解析 HDS motion 数据
+   *
+   * HDS 发送格式（motion: 后面跟 JSON）：
+   * motion:{"accelerometer":{"x":0.01,"y":-0.02,"z":-0.98},
+   *         "gravity":{"x":0.0,"y":0.0,"z":-1.0},
+   *         "rotationRate":{"x":0.0,"y":0.0,"z":0.0},
+   *         "attitude":{"roll":0.1,"pitch":0.2,"yaw":0.3}}
+   *
+   * 也可能是 CSV 格式：
+   * motion:0.01,-0.02,-0.98,0.0,0.0,-1.0,0.0,0.0,0.0,0.1,0.2,0.3
+   */
+  private parseMotionData(raw: string): void {
+    try {
+      const trimmed = raw.trim();
+
+      // JSON 格式
+      if (trimmed.startsWith('{')) {
+        const json = JSON.parse(trimmed);
+        const motion = this.buildMotionFromJson(json);
+        if (motion) {
+          this.emit('motionData', motion);
+        }
+        return;
+      }
+
+      // CSV 格式：12 个数值（accel xyz, gravity xyz, rotation xyz, attitude rpy）
+      const parts = trimmed.split(',').map(Number);
+      if (parts.length >= 12 && parts.every(Number.isFinite)) {
+        const motion: MotionData = {
+          accelerometer: { x: parts[0], y: parts[1], z: parts[2] },
+          gravity: { x: parts[3], y: parts[4], z: parts[5] },
+          rotationRate: { x: parts[6], y: parts[7], z: parts[8] },
+          attitude: { roll: parts[9], pitch: parts[10], yaw: parts[11] },
+          timestamp: Date.now(),
+        };
+        this.emit('motionData', motion);
+      }
+    } catch {
+      // motion 数据解析失败，静默忽略（高频数据不应阻塞）
+    }
+  }
+
+  /**
+   * 从 JSON 对象构建 MotionData
+   */
+  private buildMotionFromJson(json: Record<string, unknown>): MotionData | null {
+    const accel = this.parseVector3(json.accelerometer ?? json.accel);
+    const grav = this.parseVector3(json.gravity ?? json.grav);
+    const rot = this.parseVector3(json.rotationRate ?? json.rotation);
+    const att = this.parseAttitude(json.attitude ?? json.att);
+
+    // 至少需要加速度数据
+    if (!accel) {
+      return null;
+    }
+
+    return {
+      accelerometer: accel,
+      gravity: grav ?? { x: 0, y: 0, z: -1 }, // 默认重力向下
+      rotationRate: rot ?? { x: 0, y: 0, z: 0 },
+      attitude: att ?? { roll: 0, pitch: 0, yaw: 0 },
+      timestamp: Date.now(),
+    };
+  }
+
+  private parseVector3(obj: unknown): Vector3 | null {
+    if (!obj || typeof obj !== 'object') { return null; }
+    const o = obj as Record<string, unknown>;
+    const x = Number(o.x);
+    const y = Number(o.y);
+    const z = Number(o.z);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) { return null; }
+    return { x, y, z };
+  }
+
+  private parseAttitude(obj: unknown): AttitudeData | null {
+    if (!obj || typeof obj !== 'object') { return null; }
+    const o = obj as Record<string, unknown>;
+    const roll = Number(o.roll);
+    const pitch = Number(o.pitch);
+    const yaw = Number(o.yaw);
+    if (!Number.isFinite(roll) || !Number.isFinite(pitch) || !Number.isFinite(yaw)) { return null; }
+    return { roll, pitch, yaw };
   }
 }

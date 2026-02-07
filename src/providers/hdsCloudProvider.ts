@@ -20,7 +20,9 @@
  * @version 0.1.0
  */
 import { EventEmitter } from 'events';
+import * as http from 'http';
 import * as https from 'https';
+import * as net from 'net';
 import * as vscode from 'vscode';
 import { ConnectionStatus } from '../types';
 import type { HeartRateData, HealthData, HealthDataType, HeartSocketConfig } from '../types';
@@ -119,16 +121,18 @@ export class HdsCloudProvider extends EventEmitter {
     // 从 globalState 读取
     const stored = this.context.globalState.get<string>('hdsCloudId');
     if (stored) {
-      this.cloudId = stored;
-      return stored;
+      // 检查是否为旧格式（含字母），如果是则清除重新生成
+      if (/[a-zA-Z]/.test(stored)) {
+        this.log('检测到旧格式 Cloud ID（含字母），将重新生成纯数字 ID');
+        this.context.globalState.update('hdsCloudId', undefined);
+      } else {
+        this.cloudId = stored;
+        return stored;
+      }
     }
 
-    // 生成新的 Cloud ID（6 位小写字母+数字）
-    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-    let id = '';
-    for (let i = 0; i < 6; i++) {
-      id += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
+    // 生成新的 Cloud ID（6 位纯数字，100000~999999）
+    const id = String(Math.floor(100000 + Math.random() * 900000));
 
     this.cloudId = id;
     this.context.globalState.update('hdsCloudId', id);
@@ -145,25 +149,45 @@ export class HdsCloudProvider extends EventEmitter {
 
     try {
       // 1. Firebase 匿名认证
+      this.log('[connect] Step 1/5: Firebase 匿名认证...');
       await this.signInAnonymously();
+      this.log(`[connect] Step 1/5: 认证成功, uid=${this.uid}, token长度=${this.idToken.length}`);
 
       // 2. 注册 Cloud ID（写入 uid）
+      this.log('[connect] Step 2/5: 注册 Cloud ID...');
       await this.registerCloudId();
+      this.log('[connect] Step 2/5: Cloud ID 注册完成');
 
       // 3. 设置 lastConnected 时间戳
+      this.log('[connect] Step 3/5: 设置 lastConnected...');
       await this.setLastConnected();
+      this.log('[connect] Step 3/5: lastConnected 设置完成');
 
       // 4. 启动 SSE 监听
+      this.log('[connect] Step 4/5: 启动 SSE 监听...');
       await this.startListening();
+      this.log('[connect] Step 4/5: SSE 监听已启动');
 
       // 5. 启动 Token 刷新定时器
+      this.log('[connect] Step 5/5: 启动 Token 刷新定时器...');
       this.startTokenRefreshTimer();
 
       this.updateStatus(ConnectionStatus.Reconnecting); // HDS Cloud 等待 Watch 推送数据
-      this.log(`已连接到 HDS Cloud，Cloud ID: ${this.cloudId}`);
+      this.log(`[connect] 全部完成，已连接到 HDS Cloud，Cloud ID: ${this.cloudId}`);
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       this.log(`连接失败: ${msg}`);
+
+      // 401 Permission denied → 清除缓存的认证信息，下次重连会重新登录
+      if (msg.includes('401') || msg.includes('Permission denied') || msg.includes('Unauthorized')) {
+        this.log('检测到认证失败，清除缓存的认证信息...');
+        this.idToken = '';
+        this.refreshToken = '';
+        this.uid = '';
+        await this.context.globalState.update('hdsCloudRefreshToken', undefined);
+        await this.context.globalState.update('hdsCloudUid', undefined);
+      }
+
       this.emit('error', new Error(msg));
       this.updateStatus(ConnectionStatus.Error);
 
@@ -280,6 +304,15 @@ export class HdsCloudProvider extends EventEmitter {
    * 注册 Cloud ID（写入 uid）
    * @param retryCount 当前重试次数（内部使用）
    */
+  /**
+   * 构建 Firebase RTD 认证 headers（使用 Authorization Bearer 代替 URL ?auth= 参数）
+   */
+  private getAuthHeaders(): Record<string, string> {
+    return {
+      'Authorization': `Bearer ${this.idToken}`,
+    };
+  }
+
   private async registerCloudId(retryCount = 0): Promise<void> {
     const MAX_RETRIES = 10;
 
@@ -287,12 +320,13 @@ export class HdsCloudProvider extends EventEmitter {
       throw new Error('无法生成唯一的 Cloud ID（已达到最大重试次数），请稍后重试');
     }
 
-    const url = `${FIREBASE_CONFIG.databaseURL}/overlays/${this.cloudId}/uid.json?auth=${this.idToken}`;
+    const url = `${FIREBASE_CONFIG.databaseURL}/overlays/${this.cloudId}/uid.json`;
 
     // 先检查是否已被占用
-    const existingUid = await this.httpsGet(url);
+    this.log(`[registerCloudId] 检查 Cloud ID ${this.cloudId} 是否可用...`);
+    const existingUid = await this.httpsGet(url, this.getAuthHeaders());
 
-    if (existingUid && existingUid !== `"${this.uid}"`) {
+    if (existingUid && existingUid !== 'null' && existingUid !== `"${this.uid}"`) {
       // Cloud ID 冲突，重新生成
       this.log(`Cloud ID 冲突（尝试 ${retryCount + 1}/${MAX_RETRIES}），重新生成...`);
       this.cloudId = '';
@@ -302,7 +336,8 @@ export class HdsCloudProvider extends EventEmitter {
     }
 
     // 写入 uid
-    await this.httpsPut(url, JSON.stringify(this.uid));
+    this.log(`[registerCloudId] 写入 uid 到 Cloud ID ${this.cloudId}...`);
+    await this.httpsPut(url, JSON.stringify(this.uid), this.getAuthHeaders());
     this.log(`Cloud ID 已注册: ${this.cloudId}`);
   }
 
@@ -310,74 +345,10 @@ export class HdsCloudProvider extends EventEmitter {
    * 设置 lastConnected 时间戳
    */
   private async setLastConnected(): Promise<void> {
-    const url = `${FIREBASE_CONFIG.databaseURL}/overlays/${this.cloudId}/lastConnected.json?auth=${this.idToken}`;
+    const url = `${FIREBASE_CONFIG.databaseURL}/overlays/${this.cloudId}/lastConnected.json`;
     const timestamp = new Date().toISOString();
-    await this.httpsPut(url, JSON.stringify(timestamp));
-  }
-
-  /**
-   * 启动 SSE 监听
-   */
-  private async startListening(): Promise<void> {
-    const url = `${FIREBASE_CONFIG.databaseURL}/overlays/${this.cloudId}/message.json?auth=${this.idToken}`;
-
-    this.log(`开始监听: ${url.replace(this.idToken, '***')}`);
-
-    const parsedUrl = new URL(url);
-    const options = {
-      hostname: parsedUrl.hostname,
-      port: 443,
-      path: parsedUrl.pathname + parsedUrl.search,
-      method: 'GET',
-      headers: {
-        'Accept': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-      },
-    };
-
-    this.sseRequest = https.request(options, (res) => {
-      this.sseResponse = res;
-
-      if (res.statusCode !== 200) {
-        this.log(`SSE 连接失败，状态码: ${res.statusCode}`);
-        this.scheduleReconnect();
-        return;
-      }
-
-      this.log('SSE 连接已建立');
-      this.reconnectAttempts = 0; // 重置重连次数
-
-      let buffer = '';
-
-      res.on('data', (chunk: Buffer) => {
-        buffer += chunk.toString();
-
-        // 处理 SSE 事件（可能一次收到多个事件）
-        const lines = buffer.split('\n\n');
-        buffer = lines.pop() || ''; // 保留未完成的部分
-
-        for (const eventText of lines) {
-          this.handleSSEEvent(eventText);
-        }
-      });
-
-      res.on('end', () => {
-        this.log('SSE 连接已关闭');
-        this.scheduleReconnect();
-      });
-
-      res.on('error', (error) => {
-        this.log(`SSE 错误: ${error.message}`);
-        this.scheduleReconnect();
-      });
-    });
-
-    this.sseRequest.on('error', (error: any) => {
-      this.log(`SSE 请求错误: ${error.message}`);
-      this.scheduleReconnect();
-    });
-
-    this.sseRequest.end();
+    this.log('[setLastConnected] 更新连接时间戳...');
+    await this.httpsPut(url, JSON.stringify(timestamp), this.getAuthHeaders());
   }
 
   /**
@@ -555,98 +526,430 @@ export class HdsCloudProvider extends EventEmitter {
     this.emit('log', message);
   }
 
+  // ─── 代理支持 ───────────────────────────────────
+
+  /** 请求超时（毫秒） */
+  private static readonly REQUEST_TIMEOUT = 20000;
+
   /**
-   * HTTPS POST 请求
+   * 获取代理 URL（从 VSCode 配置或环境变量）
+   */
+  private getProxyUrl(): string | null {
+    // 优先读取 VSCode http.proxy 配置
+    const vscodeProxy = vscode.workspace.getConfiguration('http').get<string>('proxy');
+    if (vscodeProxy) {
+      this.log(`使用 VSCode 代理: ${vscodeProxy}`);
+      return vscodeProxy;
+    }
+
+    // 其次读取环境变量
+    const envProxy =
+      process.env.HTTPS_PROXY ||
+      process.env.https_proxy ||
+      process.env.HTTP_PROXY ||
+      process.env.http_proxy;
+    if (envProxy) {
+      this.log(`使用环境变量代理: ${envProxy}`);
+      return envProxy;
+    }
+
+    return null;
+  }
+
+  /**
+   * 通过 HTTP CONNECT 隧道建立 TLS 连接
+   * 返回一个 TLS socket，可用于 HTTPS 请求
+   */
+  private connectViaProxy(
+    proxyUrl: string,
+    targetHost: string,
+    targetPort: number
+  ): Promise<net.Socket> {
+    return new Promise((resolve, reject) => {
+      const proxy = new URL(proxyUrl);
+      const proxyHost = proxy.hostname;
+      const proxyPort = parseInt(proxy.port, 10) || (proxy.protocol === 'https:' ? 443 : 80);
+
+      // 设置代理认证（如果有）
+      const headers: Record<string, string> = {
+        'Host': `${targetHost}:${targetPort}`,
+      };
+      if (proxy.username && proxy.password) {
+        const auth = Buffer.from(`${decodeURIComponent(proxy.username)}:${decodeURIComponent(proxy.password)}`).toString('base64');
+        headers['Proxy-Authorization'] = `Basic ${auth}`;
+      }
+
+      const connectReq = http.request({
+        host: proxyHost,
+        port: proxyPort,
+        method: 'CONNECT',
+        path: `${targetHost}:${targetPort}`,
+        headers,
+      });
+
+      const timeout = setTimeout(() => {
+        connectReq.destroy();
+        reject(new Error(`代理连接超时（${HdsCloudProvider.REQUEST_TIMEOUT / 1000}s）`));
+      }, HdsCloudProvider.REQUEST_TIMEOUT);
+
+      connectReq.on('connect', (_res, socket) => {
+        clearTimeout(timeout);
+
+        if (_res.statusCode !== 200) {
+          socket.destroy();
+          reject(new Error(`代理 CONNECT 失败: HTTP ${_res.statusCode}`));
+          return;
+        }
+
+        // 返回原始 TCP socket（CONNECT 隧道）
+        // 让 https.request 自己在隧道上建立 TLS，避免双重 TLS
+        resolve(socket);
+      });
+
+      connectReq.on('error', (err) => {
+        clearTimeout(timeout);
+        reject(new Error(`代理连接失败: ${err.message}`));
+      });
+
+      connectReq.end();
+    });
+  }
+
+  /**
+   * 增强的 HTTPS 请求错误处理
+   */
+  private enhanceError(error: Error, url: string): Error {
+    const hostname = new URL(url).hostname;
+    const msg = error.message;
+
+    // TLS 断开 / 连接重置 — 大概率是网络受限（GFW）
+    if (
+      msg.includes('TLS') ||
+      msg.includes('ECONNRESET') ||
+      msg.includes('ECONNREFUSED') ||
+      msg.includes('ETIMEDOUT') ||
+      msg.includes('socket disconnected') ||
+      msg.includes('socket hang up')
+    ) {
+      const proxyUrl = this.getProxyUrl();
+      const hint = proxyUrl
+        ? `（已检测到代理 ${proxyUrl}，但连接仍然失败）`
+        : `\n💡 提示: 无法连接到 ${hostname}。如果你在中国大陆，Google 服务可能被屏蔽。\n` +
+          `   请在 VSCode 设置中配置 http.proxy，或设置环境变量 HTTPS_PROXY，例如:\n` +
+          `   "http.proxy": "http://127.0.0.1:7890"`;
+      return new Error(`${msg}${hint}`);
+    }
+
+    return error;
+  }
+
+  /**
+   * HTTPS POST 请求（支持代理 + 超时）
    */
   private httpsPost(url: string, data: string): Promise<string> {
-    return new Promise((resolve, reject) => {
+    return new Promise(async (resolve, reject) => {
       const parsedUrl = new URL(url);
-      const options = {
-        hostname: parsedUrl.hostname,
-        port: 443,
-        path: parsedUrl.pathname + parsedUrl.search,
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(data),
-        },
+      const proxyUrl = this.getProxyUrl();
+
+      const requestHeaders: Record<string, string | number> = {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(data),
+        'Referer': 'https://hds.dev/',
       };
 
-      const req = https.request(options, (res) => {
-        let responseData = '';
-        res.on('data', (chunk) => {
-          responseData += chunk;
-        });
-        res.on('end', () => {
-          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-            resolve(responseData);
-          } else {
-            reject(new Error(`HTTP ${res.statusCode}: ${responseData}`));
-          }
-        });
-      });
+      try {
+        let req: http.ClientRequest;
 
-      req.on('error', reject);
-      req.write(data);
-      req.end();
+        if (proxyUrl) {
+          // 通过代理隧道
+          const tunnelSocket = await this.connectViaProxy(proxyUrl, parsedUrl.hostname, 443);
+
+          req = https.request(
+            {
+              hostname: parsedUrl.hostname,
+              port: 443,
+              path: parsedUrl.pathname + parsedUrl.search,
+              method: 'POST',
+              headers: requestHeaders,
+              createConnection: () => tunnelSocket, // 让 https 在隧道上建立 TLS
+            },
+            (res) => this.handleResponse(res, resolve, reject)
+          );
+        } else {
+          // 直连
+          req = https.request(
+            {
+              hostname: parsedUrl.hostname,
+              port: 443,
+              path: parsedUrl.pathname + parsedUrl.search,
+              method: 'POST',
+              headers: requestHeaders,
+            },
+            (res) => this.handleResponse(res, resolve, reject)
+          );
+        }
+
+        // 超时
+        req.setTimeout(HdsCloudProvider.REQUEST_TIMEOUT, () => {
+          req.destroy();
+          reject(this.enhanceError(new Error(`请求超时（${HdsCloudProvider.REQUEST_TIMEOUT / 1000}s）`), url));
+        });
+
+        req.on('error', (err) => reject(this.enhanceError(err, url)));
+        req.write(data);
+        req.end();
+      } catch (err) {
+        reject(this.enhanceError(err instanceof Error ? err : new Error(String(err)), url));
+      }
     });
   }
 
   /**
-   * HTTPS PUT 请求
+   * HTTPS PUT 请求（支持代理 + 超时）
    */
-  private httpsPut(url: string, data: string): Promise<string> {
-    return new Promise((resolve, reject) => {
+  private httpsPut(url: string, data: string, extraHeaders?: Record<string, string>): Promise<string> {
+    return new Promise(async (resolve, reject) => {
       const parsedUrl = new URL(url);
-      const options = {
-        hostname: parsedUrl.hostname,
-        port: 443,
-        path: parsedUrl.pathname + parsedUrl.search,
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(data),
-        },
+      const proxyUrl = this.getProxyUrl();
+
+      const requestHeaders: Record<string, string | number> = {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(data),
+        'Referer': 'https://hds.dev/',
+        ...extraHeaders,
       };
 
-      const req = https.request(options, (res) => {
-        let responseData = '';
-        res.on('data', (chunk) => {
-          responseData += chunk;
-        });
-        res.on('end', () => {
-          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-            resolve(responseData);
-          } else {
-            reject(new Error(`HTTP ${res.statusCode}: ${responseData}`));
-          }
-        });
-      });
+      try {
+        let req: http.ClientRequest;
 
-      req.on('error', reject);
-      req.write(data);
-      req.end();
+        if (proxyUrl) {
+          const tunnelSocket = await this.connectViaProxy(proxyUrl, parsedUrl.hostname, 443);
+
+          req = https.request(
+            {
+              hostname: parsedUrl.hostname,
+              port: 443,
+              path: parsedUrl.pathname + parsedUrl.search,
+              method: 'PUT',
+              headers: requestHeaders,
+              createConnection: () => tunnelSocket,
+            },
+            (res) => this.handleResponse(res, resolve, reject)
+          );
+        } else {
+          req = https.request(
+            {
+              hostname: parsedUrl.hostname,
+              port: 443,
+              path: parsedUrl.pathname + parsedUrl.search,
+              method: 'PUT',
+              headers: requestHeaders,
+            },
+            (res) => this.handleResponse(res, resolve, reject)
+          );
+        }
+
+        req.setTimeout(HdsCloudProvider.REQUEST_TIMEOUT, () => {
+          req.destroy();
+          reject(this.enhanceError(new Error(`请求超时（${HdsCloudProvider.REQUEST_TIMEOUT / 1000}s）`), url));
+        });
+
+        req.on('error', (err) => reject(this.enhanceError(err, url)));
+        req.write(data);
+        req.end();
+      } catch (err) {
+        reject(this.enhanceError(err instanceof Error ? err : new Error(String(err)), url));
+      }
     });
   }
 
   /**
-   * HTTPS GET 请求
+   * HTTPS GET 请求（支持代理 + 超时）
    */
-  private httpsGet(url: string): Promise<string> {
-    return new Promise((resolve, reject) => {
-      https.get(url, (res) => {
-        let data = '';
-        res.on('data', (chunk) => {
-          data += chunk;
+  private httpsGet(url: string, extraHeaders?: Record<string, string>): Promise<string> {
+    return new Promise(async (resolve, reject) => {
+      const parsedUrl = new URL(url);
+      const proxyUrl = this.getProxyUrl();
+
+      const requestHeaders: Record<string, string> = {
+        'Referer': 'https://hds.dev/',
+        ...extraHeaders,
+      };
+
+      try {
+        let req: http.ClientRequest;
+
+        if (proxyUrl) {
+          const tunnelSocket = await this.connectViaProxy(proxyUrl, parsedUrl.hostname, 443);
+
+          req = https.request(
+            {
+              hostname: parsedUrl.hostname,
+              port: 443,
+              path: parsedUrl.pathname + parsedUrl.search,
+              method: 'GET',
+              headers: requestHeaders,
+              createConnection: () => tunnelSocket,
+            },
+            (res) => this.handleResponse(res, resolve, reject)
+          );
+        } else {
+          req = https.request(
+            {
+              hostname: parsedUrl.hostname,
+              port: 443,
+              path: parsedUrl.pathname + parsedUrl.search,
+              method: 'GET',
+              headers: requestHeaders,
+            },
+            (res) => this.handleResponse(res, resolve, reject)
+          );
+        }
+
+        req.setTimeout(HdsCloudProvider.REQUEST_TIMEOUT, () => {
+          req.destroy();
+          reject(this.enhanceError(new Error(`请求超时（${HdsCloudProvider.REQUEST_TIMEOUT / 1000}s）`), url));
         });
-        res.on('end', () => {
-          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-            resolve(data);
-          } else {
-            reject(new Error(`HTTP ${res.statusCode}: ${data}`));
-          }
-        });
-      }).on('error', reject);
+
+        req.on('error', (err) => reject(this.enhanceError(err, url)));
+        req.end();
+      } catch (err) {
+        reject(this.enhanceError(err instanceof Error ? err : new Error(String(err)), url));
+      }
     });
+  }
+
+  /**
+   * 处理 HTTP 响应
+   */
+  private handleResponse(
+    res: http.IncomingMessage,
+    resolve: (value: string) => void,
+    reject: (reason: Error) => void
+  ): void {
+    let data = '';
+    res.on('data', (chunk) => {
+      data += chunk;
+    });
+    res.on('end', () => {
+      if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+        resolve(data);
+      } else {
+        // 详细记录错误信息，帮助诊断 401 等认证问题
+        if (res.statusCode === 401 || res.statusCode === 403) {
+          this.log(`[Auth Error] HTTP ${res.statusCode}`);
+          this.log(`[Auth Error] Response body: ${data}`);
+          this.log(`[Auth Error] Token length: ${this.idToken?.length ?? 0}`);
+          this.log(`[Auth Error] UID: ${this.uid}`);
+        }
+        reject(new Error(`HTTP ${res.statusCode}: ${data}`));
+      }
+    });
+  }
+
+  /**
+   * 启动 SSE 监听（支持代理 + 超时）
+   */
+  private async startListening(): Promise<void> {
+    const url = `${FIREBASE_CONFIG.databaseURL}/overlays/${this.cloudId}/message.json`;
+
+    this.log(`[startListening] 开始监听 Cloud ID: ${this.cloudId}`);
+
+    const parsedUrl = new URL(url);
+    const proxyUrl = this.getProxyUrl();
+
+    const sseHeaders: Record<string, string> = {
+      'Accept': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Referer': 'https://hds.dev/',
+      'Authorization': `Bearer ${this.idToken}`,
+    };
+
+    const handleSseResponse = (res: http.IncomingMessage) => {
+      this.sseResponse = res;
+
+      if (res.statusCode !== 200) {
+        this.log(`SSE 连接失败，状态码: ${res.statusCode}`);
+        this.scheduleReconnect();
+        return;
+      }
+
+      this.log('SSE 连接已建立');
+      this.reconnectAttempts = 0; // 重置重连次数
+
+      let buffer = '';
+
+      res.on('data', (chunk: Buffer) => {
+        buffer += chunk.toString();
+
+        // 处理 SSE 事件（可能一次收到多个事件）
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop() || ''; // 保留未完成的部分
+
+        for (const eventText of lines) {
+          this.handleSSEEvent(eventText);
+        }
+      });
+
+      res.on('end', () => {
+        this.log('SSE 连接已关闭');
+        this.scheduleReconnect();
+      });
+
+      res.on('error', (error) => {
+        this.log(`SSE 错误: ${error.message}`);
+        this.scheduleReconnect();
+      });
+    };
+
+    try {
+      if (proxyUrl) {
+        // 通过代理隧道建立 SSE 连接
+        const tunnelSocket = await this.connectViaProxy(proxyUrl, parsedUrl.hostname, 443);
+
+        this.sseRequest = https.request(
+          {
+            hostname: parsedUrl.hostname,
+            port: 443,
+            path: parsedUrl.pathname + parsedUrl.search,
+            method: 'GET',
+            headers: sseHeaders,
+            createConnection: () => tunnelSocket,
+          },
+          handleSseResponse
+        );
+      } else {
+        // 直连 SSE
+        this.sseRequest = https.request(
+          {
+            hostname: parsedUrl.hostname,
+            port: 443,
+            path: parsedUrl.pathname + parsedUrl.search,
+            method: 'GET',
+            headers: sseHeaders,
+          },
+          handleSseResponse
+        );
+      }
+
+      // SSE 连接超时（30 秒，比普通请求长）
+      this.sseRequest.setTimeout(30000, () => {
+        this.log('SSE 连接超时');
+        this.sseRequest?.destroy();
+        this.scheduleReconnect();
+      });
+
+      this.sseRequest.on('error', (error: any) => {
+        const enhanced = this.enhanceError(error, url);
+        this.log(`SSE 请求错误: ${enhanced.message}`);
+        this.scheduleReconnect();
+      });
+
+      this.sseRequest.end();
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      this.log(`SSE 建立失败: ${msg}`);
+      this.scheduleReconnect();
+    }
   }
 }

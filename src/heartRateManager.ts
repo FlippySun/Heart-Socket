@@ -12,8 +12,8 @@ import * as os from 'os';
 import { getConfig, onConfigChange } from './config';
 import { StatusBarManager } from './statusBarManager';
 import { AlertManager } from './alertManager';
+import { MotionAnalyzer } from './motionAnalyzer';
 import { HdsProvider } from './providers/hdsProvider';
-import { HdsCloudProvider } from './providers/hdsCloudProvider';
 import { HypeRateProvider } from './providers/hyperateProvider';
 import { PulsoidProvider } from './providers/pulsoidProvider';
 import { CustomProvider } from './providers/customProvider';
@@ -21,11 +21,16 @@ import { ConnectionStatus } from './types';
 import type {
   HeartRateData,
   HealthData,
+  MotionData,
+  MotionAnalysisResult,
   HealthSnapshot,
   HeartSocketConfig,
   HeartRateStats,
   ProviderType,
   IHeartRateProvider,
+  CodingIntensityLevel,
+  PostureState,
+  FlowState,
 } from './types';
 
 /** 心率历史记录最大保留数量 */
@@ -35,6 +40,8 @@ export class HeartRateManager {
   private provider: IHeartRateProvider | null = null;
   private statusBar: StatusBarManager;
   private alertManager: AlertManager;
+  private motionAnalyzer: MotionAnalyzer;
+  private sedentaryReminderTimer: ReturnType<typeof setTimeout> | null = null;
   private config: HeartSocketConfig;
   private disposables: vscode.Disposable[] = [];
   private context: vscode.ExtensionContext;
@@ -65,12 +72,21 @@ export class HeartRateManager {
   private statsPanel: vscode.WebviewPanel | null = null;
   private guidePanel: vscode.WebviewPanel | null = null;
 
+  // 网络变化监控（HDS 本地模式）
+  private lastKnownIp: string | null = null;
+  private networkMonitorTimer: ReturnType<typeof setInterval> | null = null;
+  private static readonly NETWORK_CHECK_INTERVAL = 15_000; // 15秒
+
   constructor(context: vscode.ExtensionContext) {
     this.context = context;
     this.config = getConfig();
     this.statusBar = new StatusBarManager(this.config);
     this.alertManager = new AlertManager(this.config);
+    this.motionAnalyzer = new MotionAnalyzer(this.config);
     this.outputChannel = vscode.window.createOutputChannel('Heart Socket');
+
+    // 绑定 MotionAnalyzer 事件
+    this.bindMotionAnalyzerEvents();
 
     // 监听配置变更
     const configDisposable = onConfigChange((newConfig) => {
@@ -103,6 +119,11 @@ export class HeartRateManager {
       this.resetStats();
       this.log(`正在连接到 ${this.provider.name}...`);
       this.provider.connect();
+
+      // HDS 本地模式：启动网络变化监控
+      if (this.config.provider === 'hds') {
+        this.startNetworkMonitor();
+      }
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       this.log(`连接失败: ${msg}`);
@@ -114,6 +135,7 @@ export class HeartRateManager {
    * 断开连接
    */
   disconnect(): void {
+    this.stopNetworkMonitor();
     if (this.provider) {
       this.log('断开连接');
       this.provider.dispose();
@@ -127,6 +149,35 @@ export class HeartRateManager {
    * 快速操作菜单（已连接时点击状态栏）
    */
   async quickActions(): Promise<void> {
+    const isConnected = this.provider && this.provider.isConnected;
+    const isActive = !!this.provider; // provider 已创建但可能还没连上
+
+    if (!isActive) {
+      // ── 未连接：右下角弹出模式选择 ──
+      const action = await vscode.window.showInformationMessage(
+        '💓 Heart Socket: 选择连接模式',
+        'HDS 直连 (推荐)',
+        '更多选项...'
+      );
+
+      if (!action) {
+        return;
+      }
+
+      if (action === 'HDS 直连 (推荐)') {
+        // 设置为 HDS 本地模式并连接
+        const wsConfig = vscode.workspace.getConfiguration('heartSocket');
+        await wsConfig.update('provider', 'hds', vscode.ConfigurationTarget.Global);
+        await this.context.globalState.update('hasConfiguredProvider', true);
+        await this.connect();
+      } else if (action === '更多选项...') {
+        // 弹出完整的 QuickPick 选择
+        await this.switchProvider();
+      }
+      return;
+    }
+
+    // ── 已连接 / 正在连接：使用 QuickPick（功能多） ──
     const items: vscode.QuickPickItem[] = [
       {
         label: '$(graph) 查看心率统计',
@@ -142,14 +193,6 @@ export class HeartRateManager {
       },
     ];
 
-    // 如果是 HDS Cloud 模式，添加"查看 Cloud ID"选项
-    if (this.config.provider === 'hds-cloud' && this.provider) {
-      items.splice(1, 0, {
-        label: '$(cloud) 查看/复制 Cloud ID',
-        description: 'HDS Cloud 配置信息',
-      });
-    }
-
     const selected = await vscode.window.showQuickPick(items, {
       placeHolder: 'Heart Socket — 选择操作',
     });
@@ -160,8 +203,6 @@ export class HeartRateManager {
 
     if (selected.label.includes('查看心率统计')) {
       await this.showStats();
-    } else if (selected.label.includes('查看/复制 Cloud ID')) {
-      await this.showHdsCloudGuide();
     } else if (selected.label.includes('断开连接')) {
       this.disconnect();
     } else if (selected.label.includes('切换数据源')) {
@@ -175,15 +216,9 @@ export class HeartRateManager {
   async switchProvider(): Promise<void> {
     const items: vscode.QuickPickItem[] = [
       {
-        label: '$(cloud) HDS Cloud',
-        description: '⭐⭐ 强烈推荐 — 云端连接',
-        detail: 'Cloud ID 永久不变，切换 WiFi 无需重新配置，Watch 可用蜂窝数据',
-        picked: this.config.provider === 'hds-cloud',
-      },
-      {
         label: '$(heart) Health Data Server (HDS)',
-        description: '⭐ 推荐 — Apple Watch 本地直连',
-        detail: '插件内置 WebSocket Server，Watch 直连无需中间件，需要同一 WiFi',
+        description: '⭐⭐ 强烈推荐 — Apple Watch 本地直连',
+        detail: '纯局域网通信，零延迟，不依赖互联网，需要同一 WiFi',
         picked: this.config.provider === 'hds',
       },
       {
@@ -217,7 +252,6 @@ export class HeartRateManager {
 
     // 从 label 中提取 provider 名称（去掉 codicon 前缀）
     const labelMap: Record<string, ProviderType> = {
-      '$(cloud) HDS Cloud': 'hds-cloud',
       '$(heart) Health Data Server (HDS)': 'hds',
       '$(pulse) Pulsoid': 'pulsoid',
       '$(broadcast) HypeRate': 'hyperate',
@@ -262,8 +296,6 @@ export class HeartRateManager {
    */
   private async guideProviderSetup(type: ProviderType): Promise<boolean> {
     switch (type) {
-      case 'hds-cloud':
-        return this.guideHdsCloudSetup();
       case 'hds':
         return this.guideHdsSetup();
       case 'pulsoid':
@@ -275,17 +307,6 @@ export class HeartRateManager {
       default:
         return false;
     }
-  }
-
-  /**
-   * HDS Cloud 引导 — 无需配置，直接使用
-   */
-  private async guideHdsCloudSetup(): Promise<boolean> {
-    await vscode.window.showInformationMessage(
-      'HDS Cloud: 无需配置，Cloud ID 将自动生成。连接后会显示引导面板，请按照指引在 Watch 上输入 Cloud ID。',
-      '好的'
-    );
-    return true;
   }
 
   /**
@@ -513,12 +534,22 @@ export class HeartRateManager {
    * 销毁所有资源
    */
   dispose(): void {
+    this.stopNetworkMonitor();
     this.disconnect();
     this.statusBar.dispose();
     this.outputChannel.dispose();
     if (this.guidePanel) {
       this.guidePanel.dispose();
       this.guidePanel = null;
+    }
+    // 清理 Motion 分析器
+    if (this.motionAnalyzer) {
+      this.motionAnalyzer.dispose();
+    }
+    // 清理久坐提醒定时器
+    if (this.sedentaryReminderTimer) {
+      clearTimeout(this.sedentaryReminderTimer);
+      this.sedentaryReminderTimer = null;
     }
     this.disposables.forEach((d) => d.dispose());
     this.disposables = [];
@@ -531,8 +562,6 @@ export class HeartRateManager {
    */
   private createProvider(type: ProviderType): IHeartRateProvider {
     switch (type) {
-      case 'hds-cloud':
-        return new HdsCloudProvider(this.config, this.context);
       case 'hds':
         return new HdsProvider(this.config);
       case 'hyperate':
@@ -558,6 +587,10 @@ export class HeartRateManager {
       this.onHealthData(data);
     });
 
+    provider.on('motionData', (data: MotionData) => {
+      this.onMotionData(data);
+    });
+
     provider.on('statusChange', (status: ConnectionStatus) => {
       this.onStatusChange(status);
     });
@@ -568,6 +601,31 @@ export class HeartRateManager {
 
     provider.on('log', (msg: string) => {
       this.log(msg);
+    });
+  }
+
+  /**
+   * 绑定 MotionAnalyzer 事件
+   */
+  private bindMotionAnalyzerEvents(): void {
+    this.motionAnalyzer.on('codingIntensityChange', (level: CodingIntensityLevel) => {
+      this.statusBar.updateCodingIntensity(level);
+    });
+
+    this.motionAnalyzer.on('analysisResult', (result: MotionAnalysisResult) => {
+      this.statusBar.updateMotionAnalysis(result);
+    });
+
+    this.motionAnalyzer.on('sedentaryAlert', (data: { duration: number; highHeartRate: boolean }) => {
+      this.showSedentaryAlert(data.duration, data.highHeartRate);
+    });
+
+    this.motionAnalyzer.on('postureAlert', (data: { duration: number; state: PostureState }) => {
+      this.showPostureAlert(data.duration, data.state);
+    });
+
+    this.motionAnalyzer.on('flowStateChange', (state: FlowState) => {
+      this.onFlowStateChange(state);
     });
   }
 
@@ -596,6 +654,9 @@ export class HeartRateManager {
     // 检查告警
     this.alertManager.check(data);
 
+    // 转发到 Motion Analyzer（辅助心流检测）
+    this.motionAnalyzer.feedHeartRate(data.bpm);
+
     // 日志
     this.log(`❤️ ${data.bpm} BPM (${data.source})`);
   }
@@ -611,6 +672,20 @@ export class HeartRateManager {
     if (this.stats.current > 0) {
       this.statusBar.updateHealthSnapshot(this.healthSnapshot);
     }
+
+    // 步数数据转发到 Motion Analyzer（久坐检测）
+    if (data.type === 'stepCount') {
+      this.motionAnalyzer.feedStepCount(data.value);
+    }
+  }
+
+  /**
+   * 处理 Motion 数据
+   */
+  private onMotionData(data: MotionData): void {
+    if (!this.config.enableMotion) { return; }
+    // 转发到 Motion Analyzer
+    this.motionAnalyzer.feedMotion(data);
   }
 
   /**
@@ -619,8 +694,7 @@ export class HeartRateManager {
   private onStatusChange(status: ConnectionStatus): void {
     // 区分首次等待连接 vs 断开后重连
     const isHds = this.config.provider === 'hds';
-    const isHdsCloud = this.config.provider === 'hds-cloud';
-    const isWaitingForDevice = status === ConnectionStatus.Reconnecting && (isHds || isHdsCloud) && !this.hasEverConnected;
+    const isWaitingForDevice = status === ConnectionStatus.Reconnecting && isHds && !this.hasEverConnected;
 
     this.statusBar.updateStatus(status, isWaitingForDevice ? { waitingForDevice: true } : undefined);
 
@@ -645,13 +719,9 @@ export class HeartRateManager {
       }
     }
 
-    // HDS/HDS Cloud 模式：首次等待连接时打开引导面板
-    if (isWaitingForDevice) {
-      if (isHdsCloud) {
-        this.showHdsCloudGuide();
-      } else {
-        this.showHdsGuide();
-      }
+    // HDS 本地模式：等待设备连接时显示引导面板
+    if (isWaitingForDevice && isHds) {
+      this.showHdsGuide();
     }
   }
 
@@ -667,6 +737,18 @@ export class HeartRateManager {
 
     if (this.provider) {
       this.provider.updateConfig(newConfig);
+    }
+
+    // 更新 Motion 分析器配置
+    if (this.motionAnalyzer) {
+      this.motionAnalyzer.updateConfig({
+        enableMotion: newConfig.enableMotion,
+        sedentaryMinutes: newConfig.sedentaryMinutes,
+        postureAlertSeconds: newConfig.postureAlertSeconds,
+        showCodingIntensity: newConfig.showCodingIntensity,
+        showFlowState: newConfig.showFlowState,
+        showSlackingIndex: newConfig.showSlackingIndex,
+      });
     }
 
     // 如果 Provider 类型变了且当前已连接，需要重新连接
@@ -734,12 +816,63 @@ export class HeartRateManager {
     return null;
   }
 
+  // ─── Network Change Detection ─────────────────────────────────
+
+  /**
+   * 启动网络变化监控（仅 HDS 模式）
+   * 每 15 秒检测一次本机 IP，若发生变化则提醒用户更新 Watch 地址
+   */
+  private startNetworkMonitor(): void {
+    this.stopNetworkMonitor(); // 防止重复启动
+    this.lastKnownIp = this.getLocalIp();
+    this.networkMonitorTimer = setInterval(() => {
+      const currentIp = this.getLocalIp();
+      if (currentIp !== this.lastKnownIp) {
+        const oldIp = this.lastKnownIp;
+        this.lastKnownIp = currentIp;
+        this.notifyIpChanged(oldIp, currentIp);
+      }
+    }, HeartRateManager.NETWORK_CHECK_INTERVAL);
+  }
+
+  /**
+   * 停止网络变化监控
+   */
+  private stopNetworkMonitor(): void {
+    if (this.networkMonitorTimer) {
+      clearInterval(this.networkMonitorTimer);
+      this.networkMonitorTimer = null;
+    }
+  }
+
+  /**
+   * IP 变化时通知用户
+   */
+  private notifyIpChanged(oldIp: string | null, newIp: string | null): void {
+    const oldDisplay = oldIp ?? '未知';
+    const newDisplay = newIp ?? '网络已断开';
+    const message = newIp
+      ? `⚠️ WiFi 网络已变化！IP: ${oldDisplay} → ${newDisplay}，请在 Apple Watch HDS App 中更新服务器地址。`
+      : `⚠️ 网络连接已断开（原 IP: ${oldDisplay}），Apple Watch 将无法发送心率数据。`;
+
+    vscode.window
+      .showWarningMessage(message, '查看新地址')
+      .then((action) => {
+        if (action === '查看新地址') {
+          this.showHdsGuide();
+        }
+      });
+
+    this.log(`[NetworkMonitor] IP changed: ${oldDisplay} → ${newDisplay}`);
+  }
+
+  // ─── Helpers ──────────────────────────────────────────────────
+
   /**
    * 获取数据源显示名称
    */
   private getProviderLabel(type: ProviderType): string {
     const labels: Record<ProviderType, string> = {
-      'hds-cloud': 'HDS Cloud (云端连接)',
       hds: 'HDS (Apple Watch 本地直连)',
       pulsoid: 'Pulsoid',
       hyperate: 'HypeRate',
@@ -778,60 +911,33 @@ export class HeartRateManager {
   }
 
   /**
-   * 打开 HDS Cloud 设备连接引导面板
-   */
-  private showHdsCloudGuide(): void {
-    const cloudId = (this.provider as any).getCloudId?.() ?? 'loading...';
-
-    // 单例模式
-    if (this.guidePanel) {
-      this.guidePanel.webview.html = this.getHdsCloudGuideHtml(cloudId);
-      this.guidePanel.reveal(vscode.ViewColumn.One);
-      return;
-    }
-
-    this.guidePanel = vscode.window.createWebviewPanel(
-      'heartSocketCloudGuide',
-      '☁️ Heart Socket Cloud — 设备连接引导',
-      vscode.ViewColumn.One,
-      { enableScripts: true }
-    );
-
-    this.guidePanel.webview.html = this.getHdsCloudGuideHtml(cloudId);
-
-    this.guidePanel.onDidDispose(() => {
-      this.guidePanel = null;
-    });
-  }
-
-  /**
    * 生成 HDS 引导页 HTML
    */
   private getHdsGuideHtml(port: number, hostname: string | null, ip: string | null): string {
     const localUrl = hostname ? `http://${hostname}.local:${port}/` : null;
     const ipUrl = ip ? `http://${ip}:${port}/` : null;
 
-    const recommendedSection = localUrl
+    const localSection = localUrl
       ? `
-      <div class="url-section recommended">
-        <div class="url-label">📡 推荐地址 <span class="badge">切换 WiFi 无需修改</span></div>
+      <div class="url-section">
+        <div class="url-label">🏠 Bonjour 地址 <span class="badge">切换 WiFi 无需修改</span></div>
         <div class="url-box">
           <code id="localUrl">${localUrl}</code>
           <button class="copy-btn" onclick="copyUrl('localUrl')">📋 复制</button>
         </div>
-        <div class="url-hint">💡 这是 Bonjour 地址，与系统设置中的"电脑名称"可能不同，属于正常现象</div>
+        <div class="url-hint">⚠️ 需确保 Watch 直连 WiFi — 请在 iPhone 上<strong>关闭蓝牙</strong>或开启<strong>飞行模式</strong>，否则 .local 无法解析</div>
       </div>`
       : '';
 
-    const backupSection = ipUrl
+    const ipSection = ipUrl
       ? `
-      <div class="url-section backup">
-        <div class="url-label">🔌 备用地址 <span class="badge secondary">当前 WiFi IP</span></div>
+      <div class="url-section">
+        <div class="url-label">🔌 IP 地址 <span class="badge secondary">任何模式可用</span></div>
         <div class="url-box">
           <code id="ipUrl">${ipUrl}</code>
           <button class="copy-btn" onclick="copyUrl('ipUrl')">📋 复制</button>
         </div>
-        <div class="url-hint">⚠️ 切换 WiFi 后 IP 会变，需要重新配置</div>
+        <div class="url-hint">⚠️ 切换 WiFi 后 IP 会改变，届时 VSCode 会弹窗提醒您更新地址</div>
       </div>`
       : '';
 
@@ -1021,8 +1127,8 @@ export class HeartRateManager {
     <div class="status-badge">⏳ 等待设备连接中...</div>
   </div>
 
-  ${recommendedSection}
-  ${backupSection}
+  ${localSection}
+  ${ipSection}
 
   <div class="steps">
     <h2>📋 配置步骤</h2>
@@ -1030,6 +1136,7 @@ export class HeartRateManager {
       <li>确保 Apple Watch 与 Mac 连接<strong>同一个 WiFi 网络</strong></li>
       <li>在 Apple Watch 上打开 <strong>HDS App</strong></li>
       <li>关闭 <strong>HDS Cloud</strong> 开关（如果有）</li>
+      <li>打开 <strong>Advanced IP entry</strong> 开关（否则无法输入 http 等英文字符）</li>
       <li>在 <strong>Overlay IDs</strong> 输入框中 <strong>粘贴</strong> 上方复制的地址</li>
       <li>点击 <strong>Start</strong> 按钮 → VSCode 状态栏将显示实时心率 ♥</li>
     </ol>
@@ -1041,10 +1148,13 @@ export class HeartRateManager {
       <strong>🚫 Bad URL</strong> — URL 必须以 <code>http://</code> 开头且以 <code>/</code> 结尾，缺一不可
     </div>
     <div class="faq-item">
-      <strong>🔄 连不上</strong> — 检查 Watch 和 Mac 是否在同一 WiFi；如果用了 VPN 请关闭
+      <strong>🔄 .local 地址连不上</strong> — Watch 可能通过 iPhone 蓝牙桥接上网，mDNS 多播包被桥接层丢弃。<br>👉 解决：在 iPhone 上<strong>关闭蓝牙</strong>或开启<strong>飞行模式</strong>，让 Watch 直连 WiFi
     </div>
     <div class="faq-item">
-      <strong>💻 地址与电脑名称不一样</strong> — 上方显示的是 Bonjour 网络名称，与系统设置中的"电脑名称"不同，属于正常
+      <strong>🔄 IP 地址连不上</strong> — 检查 Watch 和 Mac 是否在同一 WiFi；如果用了 VPN 请关闭
+    </div>
+    <div class="faq-item">
+      <strong>📶 换了 WiFi / IP 变了</strong> — VSCode 会自动检测 IP 变化并弹窗提醒，点击「查看新地址」即可获取最新地址
     </div>
     <div class="faq-item">
       <strong>📱 没有 HDS App？</strong> — 在 App Store 搜索 <a href="https://apps.apple.com/us/app/health-data-server/id1496042074">Health Data Server</a>（需 watchOS 8+）
@@ -1071,279 +1181,6 @@ export class HeartRateManager {
               btn.classList.remove('copied');
             }, 2000);
           });
-        }
-      });
-    }
-  </script>
-</body>
-</html>`;
-  }
-
-  /**
-   * 生成 HDS Cloud 引导页 HTML
-   */
-  private getHdsCloudGuideHtml(cloudId: string): string {
-    return `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Heart Socket Cloud — 设备连接引导</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      padding: 32px;
-      color: var(--vscode-foreground);
-      background: var(--vscode-editor-background);
-      max-width: 720px;
-      margin: 0 auto;
-    }
-    .header {
-      text-align: center;
-      margin-bottom: 40px;
-    }
-    .header h1 {
-      font-size: 28px;
-      margin-bottom: 8px;
-    }
-    .header .subtitle {
-      font-size: 14px;
-      opacity: 0.6;
-    }
-    .status-badge {
-      display: inline-block;
-      margin-top: 12px;
-      padding: 6px 16px;
-      border-radius: 20px;
-      font-size: 13px;
-      font-weight: 500;
-      background: var(--vscode-badge-background);
-      color: var(--vscode-badge-foreground);
-      animation: pulse 2s ease-in-out infinite;
-    }
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.6; }
-    }
-    .cloud-id-section {
-      margin-bottom: 32px;
-      border: 2px solid var(--vscode-charts-blue, #42a5f5);
-      border-radius: 12px;
-      padding: 24px;
-      background: var(--vscode-editorWidget-background);
-      text-align: center;
-    }
-    .cloud-id-label {
-      font-size: 15px;
-      font-weight: 600;
-      margin-bottom: 16px;
-      color: var(--vscode-charts-blue, #42a5f5);
-    }
-    .cloud-id-box {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 12px;
-      margin-bottom: 12px;
-    }
-    .cloud-id-box code {
-      font-size: 32px;
-      font-weight: bold;
-      padding: 16px 24px;
-      border-radius: 8px;
-      background: var(--vscode-textCodeBlock-background);
-      border: 1px solid var(--vscode-editorWidget-border);
-      letter-spacing: 3px;
-      user-select: all;
-    }
-    .copy-btn {
-      padding: 12px 20px;
-      border: none;
-      border-radius: 8px;
-      background: var(--vscode-button-background);
-      color: var(--vscode-button-foreground);
-      cursor: pointer;
-      font-size: 14px;
-      white-space: nowrap;
-      transition: opacity 0.2s;
-    }
-    .copy-btn:hover {
-      opacity: 0.85;
-    }
-    .copy-btn.copied {
-      background: var(--vscode-charts-green, #4caf50);
-    }
-    .cloud-id-hint {
-      font-size: 13px;
-      opacity: 0.7;
-      line-height: 1.5;
-    }
-    .advantage {
-      background: var(--vscode-editorWidget-background);
-      border: 1px solid var(--vscode-editorWidget-border);
-      border-radius: 8px;
-      padding: 16px;
-      margin-bottom: 24px;
-    }
-    .advantage h3 {
-      font-size: 16px;
-      margin-bottom: 12px;
-      color: var(--vscode-charts-green, #4caf50);
-    }
-    .advantage ul {
-      list-style: none;
-      padding: 0;
-    }
-    .advantage li {
-      padding: 6px 0;
-      font-size: 14px;
-      line-height: 1.6;
-    }
-    .advantage li::before {
-      content: "✓ ";
-      color: var(--vscode-charts-green, #4caf50);
-      font-weight: bold;
-      margin-right: 8px;
-    }
-    .steps {
-      margin-top: 32px;
-    }
-    .steps h2 {
-      font-size: 18px;
-      margin-bottom: 16px;
-    }
-    .step-list {
-      list-style: none;
-      counter-reset: step;
-    }
-    .step-list li {
-      counter-increment: step;
-      padding: 12px 16px;
-      margin-bottom: 8px;
-      border-radius: 8px;
-      background: var(--vscode-editorWidget-background);
-      border: 1px solid var(--vscode-editorWidget-border);
-      font-size: 14px;
-      line-height: 1.6;
-      display: flex;
-      align-items: flex-start;
-      gap: 12px;
-    }
-    .step-list li::before {
-      content: counter(step);
-      min-width: 28px;
-      height: 28px;
-      border-radius: 50%;
-      background: var(--vscode-button-background);
-      color: var(--vscode-button-foreground);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 13px;
-      font-weight: bold;
-      flex-shrink: 0;
-    }
-    .faq {
-      margin-top: 32px;
-      border-top: 1px solid var(--vscode-editorWidget-border);
-      padding-top: 24px;
-    }
-    .faq h2 {
-      font-size: 16px;
-      margin-bottom: 12px;
-      opacity: 0.8;
-    }
-    .faq-item {
-      margin-bottom: 12px;
-      padding: 10px 14px;
-      border-radius: 6px;
-      background: var(--vscode-editorWidget-background);
-      font-size: 13px;
-      line-height: 1.6;
-    }
-    .faq-item strong {
-      color: var(--vscode-charts-orange, #ff9800);
-    }
-    .footer {
-      text-align: center;
-      margin-top: 32px;
-      font-size: 12px;
-      opacity: 0.4;
-    }
-  </style>
-</head>
-<body>
-  <div class="header">
-    <h1>☁️ Heart Socket Cloud</h1>
-    <div class="subtitle">Apple Watch 心率云端实时监测</div>
-    <div class="status-badge">⏳ 等待 Watch 推送数据...</div>
-  </div>
-
-  <div class="cloud-id-section">
-    <div class="cloud-id-label">☁️ 你的专属 Cloud ID</div>
-    <div class="cloud-id-box">
-      <code id="cloudId">${cloudId}</code>
-      <button class="copy-btn" onclick="copyCloudId()">📋 复制</button>
-    </div>
-    <div class="cloud-id-hint">💡 此 Cloud ID 永久有效，切换网络无需修改</div>
-  </div>
-
-  <div class="advantage">
-    <h3>🎉 HDS Cloud 优势</h3>
-    <ul>
-      <li>Cloud ID 永久不变，切换 WiFi、VPN、蜂窝数据都无需重新配置</li>
-      <li>不需要 IP 地址，不需要 .local 域名，不需要同一网络</li>
-      <li>Watch 可以在任何网络环境下发送数据（包括蜂窝数据）</li>
-      <li>数据通过 Firebase 云端中转，延迟极低（~100ms）</li>
-    </ul>
-  </div>
-
-  <div class="steps">
-    <h2>📋 配置步骤</h2>
-    <ol class="step-list">
-      <li>在 Apple Watch 上打开 <strong>HDS App</strong></li>
-      <li>进入 <strong>Settings（设置）</strong></li>
-      <li>打开 <strong>HDS Cloud</strong> 开关（必须启用）</li>
-      <li>在 <strong>Overlay IDs</strong> 输入框中 <strong>粘贴</strong> 上方的 Cloud ID（<code>${cloudId}</code>）</li>
-      <li>点击 <strong>Start</strong> 按钮 → VSCode 状态栏将显示实时心率 ♥</li>
-    </ol>
-  </div>
-
-  <div class="faq">
-    <h2>⚠️ 常见问题</h2>
-    <div class="faq-item">
-      <strong>🔄 连不上</strong> — 确保 Watch 已启用 HDS Cloud 开关，并输入正确的 Cloud ID
-    </div>
-    <div class="faq-item">
-      <strong>📱 没有 HDS App？</strong> — 在 App Store 搜索 <a href="https://apps.apple.com/us/app/health-data-server/id1496042074">Health Data Server</a>（需 watchOS 8+）
-    </div>
-    <div class="faq-item">
-      <strong>💰 HDS Cloud 收费吗？</strong> — 心率数据完全免费，其他健康数据（卡路里、步数等）需要付费订阅
-    </div>
-    <div class="faq-item">
-      <strong>🛡️ 数据安全吗？</strong> — 数据仅在连接期间临时存储在 Firebase，不会持久化保存，连接断开后自动清除
-    </div>
-  </div>
-
-  <div class="footer">
-    设备连接成功后，此面板会自动关闭 · Cloud ID: ${cloudId}
-  </div>
-
-  <script>
-    function copyCloudId() {
-      const el = document.getElementById('cloudId');
-      if (!el) return;
-      const text = el.textContent || '';
-      navigator.clipboard.writeText(text).then(() => {
-        const btn = el.parentElement?.querySelector('.copy-btn');
-        if (btn) {
-          btn.textContent = '✅ 已复制';
-          btn.classList.add('copied');
-          setTimeout(() => {
-            btn.textContent = '📋 复制';
-            btn.classList.remove('copied');
-          }, 2000);
         }
       });
     }
@@ -1520,5 +1357,73 @@ export class HeartRateManager {
   </div>
 </body>
 </html>`;
+  }
+
+  // ============================================================================
+  // Motion Analysis Handlers
+  // ============================================================================
+
+  private showSedentaryAlert(duration: number, highHeartRate: boolean): void {
+    const durationMinutes = Math.floor(duration / 60000);
+    const message = highHeartRate
+      ? `🪑 已久坐 ${durationMinutes} 分钟，且检测到心率异常偏高。建议起身活动一下！`
+      : `🪑 已久坐 ${durationMinutes} 分钟。建议起身活动一下！`;
+
+    vscode.window
+      .showWarningMessage(message, '稍后提醒', '我知道了')
+      .then((selection) => {
+        if (selection === '稍后提醒') {
+          // 清理之前的提醒定时器
+          if (this.sedentaryReminderTimer) {
+            clearTimeout(this.sedentaryReminderTimer);
+          }
+          // 延迟 10 分钟后再次弹窗提醒
+          this.sedentaryReminderTimer = setTimeout(() => {
+            this.sedentaryReminderTimer = null;
+            if (this.motionAnalyzer) {
+              // 直接再弹一次提醒（此时 duration 已经更长了）
+              this.showSedentaryAlert(duration + 10 * 60 * 1000, false);
+            }
+          }, 10 * 60 * 1000);
+        }
+      });
+  }
+
+  private showPostureAlert(duration: number, state: PostureState): void {
+    const durationSeconds = Math.floor(duration / 1000);
+    let message = '';
+
+    switch (state) {
+      case 'raised':
+        message = `🖐️ 检测到您的手腕持续抬起 ${durationSeconds} 秒。注意保持正确的打字姿势！`;
+        break;
+      case 'slacking':
+        message = `🤔 检测到可能的摸鱼姿势持续 ${durationSeconds} 秒。适当休息后记得回到工作状态哦~`;
+        break;
+      default:
+        return; // 正常打字姿势不提醒
+    }
+
+    vscode.window.showInformationMessage(message, '收到');
+  }
+
+  private onFlowStateChange(state: FlowState): void {
+    this.log(
+      `Flow state changed: active=${state.active}, duration=${state.duration}ms`
+    );
+
+    if (state.active && state.duration >= 15 * 60 * 1000) {
+      // 进入心流状态超过 15 分钟
+      vscode.window.showInformationMessage(
+        `🎯 检测到您已进入心流状态 ${Math.floor(state.duration / 60000)} 分钟！保持专注！`,
+        '太棒了'
+      );
+    } else if (!state.active && state.duration >= 15 * 60 * 1000) {
+      // 曾经的心流状态结束
+      vscode.window.showInformationMessage(
+        `🎯 心流状态结束（持续 ${Math.floor(state.duration / 60000)} 分钟）。适当休息一下吧！`,
+        '好的'
+      );
+    }
   }
 }

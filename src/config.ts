@@ -34,6 +34,13 @@ export function getConfig(): HeartSocketConfig {
     statusBarPosition: config.get<'left' | 'right'>('statusBarPosition', 'left'),
     showHeartbeatAnimation: config.get<boolean>('showHeartbeatAnimation', true),
     zones: config.get<HeartRateZones>('zones', DEFAULT_ZONES),
+    // Motion 功能配置
+    enableMotion: config.get<boolean>('enableMotion', true),
+    sedentaryMinutes: config.get<number>('sedentaryMinutes', 45),
+    postureAlertSeconds: config.get<number>('postureAlertSeconds', 30),
+    showCodingIntensity: config.get<boolean>('showCodingIntensity', true),
+    showFlowState: config.get<boolean>('showFlowState', true),
+    showSlackingIndex: config.get<boolean>('showSlackingIndex', true),
   };
 }
 
