@@ -5,14 +5,10 @@
 </p>
 
 <p align="center">
-  <a href="https://marketplace.visualstudio.com/items?itemName=flippysun.heart-socket"><img src="https://img.shields.io/visual-studio-marketplace/v/flippysun.heart-socket?style=flat-square&label=VS%20Code%20Marketplace" alt="Version"></a>
-  <a href="https://marketplace.visualstudio.com/items?itemName=flippysun.heart-socket"><img src="https://img.shields.io/visual-studio-marketplace/i/flippysun.heart-socket?style=flat-square" alt="Installs"></a>
-  <a href="https://marketplace.visualstudio.com/items?itemName=flippysun.heart-socket"><img src="https://img.shields.io/visual-studio-marketplace/r/flippysun.heart-socket?style=flat-square" alt="Rating"></a>
+  <a href="https://marketplace.visualstudio.com/items?itemName=FlippySun.heart-socket"><img src="https://img.shields.io/visual-studio-marketplace/v/FlippySun.heart-socket?style=flat-square&label=VS%20Code%20Marketplace" alt="Version"></a>
+  <a href="https://marketplace.visualstudio.com/items?itemName=FlippySun.heart-socket"><img src="https://img.shields.io/visual-studio-marketplace/i/FlippySun.heart-socket?style=flat-square" alt="Installs"></a>
+  <a href="https://marketplace.visualstudio.com/items?itemName=FlippySun.heart-socket"><img src="https://img.shields.io/visual-studio-marketplace/r/FlippySun.heart-socket?style=flat-square" alt="Rating"></a>
   <a href="https://github.com/FlippySun/Heart-Socket/blob/main/LICENSE"><img src="https://img.shields.io/github/license/FlippySun/Heart-Socket?style=flat-square" alt="License"></a>
-</p>
-
-<p align="center">
-  <img src="images/stats-panel.png" width="380" alt="Heart Socket 统计面板">
 </p>
 
 ---
@@ -48,11 +44,31 @@
 - **网络变化检测** — WiFi/IP 变化时自动弹窗提醒
 - **端口冲突处理** — 端口被占用时自动引导配置
 
-<p align="center">
-  <img src="images/tooltip.png" width="420" alt="状态栏 Tooltip">
-  &nbsp;&nbsp;
-  <img src="images/alert.png" width="420" alt="高心率告警">
-</p>
+---
+
+## 📸 功能展示
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <strong>📊 心率统计面板</strong><br><br>
+      <img src="images/stats-panel.png" width="320" alt="心率统计面板">
+      <br><em>趋势图 · 区间分布 · 健康数据总览</em>
+    </td>
+    <td align="center" width="50%">
+      <strong>💬 状态栏 Tooltip</strong><br><br>
+      <img src="images/tooltip.png" width="280" alt="状态栏 Tooltip">
+      <br><em>悬浮查看详细心率信息</em>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" colspan="2">
+      <strong>🚨 高心率告警</strong><br><br>
+      <img src="images/alert.png" width="500" alt="高心率告警">
+      <br><em>心率超过阈值时自动弹窗提醒</em>
+    </td>
+  </tr>
+</table>
 
 ## 📦 安装
 
@@ -179,7 +195,15 @@ code --install-extension heart-socket-*.vsix
 
 ## 🤝 贡献
 
-欢迎 [提交 Issue](https://github.com/FlippySun/Heart-Socket/issues) 反馈 Bug 或功能建议。
+Heart Socket 是一个开源项目，欢迎所有形式的贡献！
+
+- ⭐ **觉得有用？给个 Star 支持一下！** — [点击 Star](https://github.com/FlippySun/Heart-Socket)
+- 🐛 **发现 Bug？** — [提交 Issue](https://github.com/FlippySun/Heart-Socket/issues/new?template=bug_report.yml)
+- 💡 **有新想法？** — [功能建议](https://github.com/FlippySun/Heart-Socket/issues/new?template=feature_request.yml)
+- 🔧 **想参与开发？** — 阅读 [贡献指南](CONTRIBUTING.md) 开始你的第一个 PR
+- 💬 **想交流讨论？** — 加入 [Discussions](https://github.com/FlippySun/Heart-Socket/discussions)
+
+查看 [行为准则](CODE_OF_CONDUCT.md) 了解社区规范。
 
 ## 📄 License
 
