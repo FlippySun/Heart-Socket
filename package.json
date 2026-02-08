@@ -13,6 +13,7 @@
   "bugs": {
     "url": "https://github.com/FlippySun/Heart-Socket/issues"
   },
+  "icon": "images/icon.png",
   "galleryBanner": {
     "color": "#1e1e2e",
     "theme": "dark"

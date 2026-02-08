@@ -11,8 +11,9 @@
   <a href="https://github.com/FlippySun/Heart-Socket/blob/main/LICENSE"><img src="https://img.shields.io/github/license/FlippySun/Heart-Socket?style=flat-square" alt="License"></a>
 </p>
 
-<!-- 🖼️ 在此处放置功能截图或 GIF 动图 -->
-<!-- ![Heart Socket Demo](images/demo.gif) -->
+<p align="center">
+  <img src="images/stats-panel.png" width="380" alt="Heart Socket 统计面板">
+</p>
 
 ---
 
@@ -46,6 +47,12 @@
 - **自动重连** — 断网后指数退避自动重连
 - **网络变化检测** — WiFi/IP 变化时自动弹窗提醒
 - **端口冲突处理** — 端口被占用时自动引导配置
+
+<p align="center">
+  <img src="images/tooltip.png" width="420" alt="状态栏 Tooltip">
+  &nbsp;&nbsp;
+  <img src="images/alert.png" width="420" alt="高心率告警">
+</p>
 
 ## 📦 安装
 
