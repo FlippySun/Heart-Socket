@@ -70,8 +70,8 @@ export interface MotionData {
 /** 敲代码强度等级 */
 export type CodingIntensityLevel = 'idle' | 'light' | 'moderate' | 'intense' | 'furious';
 
-/** 手腕姿态状态 */
-export type PostureState = 'typing' | 'raised' | 'slacking';
+/** 手腕姿态状态 (v3 — 多信号融合) */
+export type PostureState = 'resting' | 'typing' | 'mousing' | 'active' | 'walking';
 
 /** 心流状态 */
 export interface FlowState {
@@ -93,8 +93,8 @@ export interface MotionAnalysisResult {
   slackingIndex: number;
   /** 精力水平 (0-100) */
   energyLevel: number;
-  /** 抬手持续时间 (ms)，仅 posture=raised/slacking 时有值 */
-  raisedDuration: number;
+  /** 非工作姿态持续时间 (ms)，posture=active/walking 时有值 */
+  postureAlertDuration: number;
   /** 久坐持续时间 (ms) */
   sedentaryDuration: number;
 }

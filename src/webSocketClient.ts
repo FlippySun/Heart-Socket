@@ -160,7 +160,7 @@ export class WebSocketClient extends EventEmitter {
     // 检查是否超过最大重试次数
     if (maxRetries !== -1 && this.reconnectAttempt >= maxRetries) {
       this.setStatus(ConnectionStatus.Error);
-      this.emit('error', new Error(`Max reconnect attempts (${maxRetries}) reached`));
+      this.emit('error', new Error(`已达到最大重连次数 (${maxRetries})，请检查网络连接`));
       return;
     }
 

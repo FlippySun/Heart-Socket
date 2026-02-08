@@ -313,9 +313,11 @@ export class StatusBarManager {
 
       // 姿态状态（中文翻译）
       const postureMap: Record<string, { emoji: string; label: string }> = {
+        resting: { emoji: '😴', label: '静息' },
         typing: { emoji: '⌨️', label: '打字中' },
-        raised: { emoji: '🖐️', label: '抬手' },
-        slacking: { emoji: '🤔', label: '摸鱼' },
+        mousing: { emoji: '🖱️', label: '鼠标操作' },
+        active: { emoji: '💪', label: '活动中' },
+        walking: { emoji: '🚶', label: '走动' },
       };
       const postureInfo = postureMap[this.motionAnalysis.posture] ?? { emoji: '❓', label: this.motionAnalysis.posture };
       lines.push(`${postureInfo.emoji} 姿态: ${postureInfo.label}`);

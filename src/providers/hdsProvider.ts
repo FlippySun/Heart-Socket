@@ -15,11 +15,12 @@ import { HeartSocketServer } from '../webSocketServer';
 import { ConnectionStatus } from '../types';
 import type { HeartRateData, HealthData, HealthDataType, MotionData, Vector3, AttitudeData, HeartSocketConfig } from '../types';
 
-/** HDS key → HealthDataType 映射 */
+/** HDS key → HealthDataType 映射（key 均为小写，因为解析时会 toLowerCase） */
 const HEALTH_KEY_MAP: Record<string, HealthDataType> = {
   calories: 'calories',
   stepcount: 'stepCount',
   distance: 'distance',
+  distancetraveled: 'distance', // Watch 实际发送的是 distanceTraveled
   speed: 'speed',
   bloodoxygen: 'bloodOxygen',
   bodymass: 'bodyMass',
@@ -31,6 +32,8 @@ export class HdsProvider extends EventEmitter {
   private server: HeartSocketServer;
   private config: HeartSocketConfig;
   private _isConnected: boolean = false;
+  /** 已警告过的未识别 key 集合（避免重复日志刷屏） */
+  private warnedKeys: Set<string> = new Set();
 
   constructor(config: HeartSocketConfig) {
     super();
@@ -136,11 +139,16 @@ export class HdsProvider extends EventEmitter {
           const num = Number(value);
           if (Number.isFinite(num)) {
             this.emitHealthData(healthType, num);
+            this.emit('log', `[HDS] 健康数据: ${healthType} = ${num}`);
           }
           return;
         }
 
-        // 未知 key，静默忽略
+        // 未知 key，记录警告（每种 key 仅首次警告，避免刷屏）
+        if (!this.warnedKeys.has(key)) {
+          this.warnedKeys.add(key);
+          this.emit('log', `[HDS] ⚠️ 未识别的数据 key: "${key}" (原始: "${trimmed.substring(0, 50)}")`);
+        }
         return;
       }
 
@@ -165,7 +173,7 @@ export class HdsProvider extends EventEmitter {
         { keys: ['calories', 'cal'], type: 'calories' },
         { keys: ['stepCount', 'steps', 'step_count'], type: 'stepCount' },
         { keys: ['bloodOxygen', 'spo2', 'blood_oxygen', 'SpO2'], type: 'bloodOxygen' },
-        { keys: ['distance', 'dist'], type: 'distance' },
+        { keys: ['distance', 'dist', 'distanceTraveled', 'distance_traveled'], type: 'distance' },
         { keys: ['speed'], type: 'speed' },
         { keys: ['bodyMass', 'body_mass', 'weight'], type: 'bodyMass' },
         { keys: ['bmi', 'BMI'], type: 'bmi' },

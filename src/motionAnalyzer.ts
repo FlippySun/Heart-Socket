@@ -1,13 +1,16 @@
 /**
- * Heart Socket - Motion Analyzer (v2 — 科学优化版)
+ * Heart Socket - Motion Analyzer (v3 — 数据修正版)
  *
- * 基于 GGIR/Hildebrand/Borbély 等学术研究的深度算法引擎：
- * - 🏋️ 运动强度检测：EMA 低通滤波器实时估计重力 + ENMO 标准指标
- * - 🪑 久坐检测：ENMO<40mg + 10分钟 bout + 活动中断验证（GGIR 标准）
- * - 🤚 姿态感知：加速度计重力分量推算倾斜角 + 静止守卫
- * - 🧘 心流检测：5维信号融合评分 + 滞回设计（进入≥70/退出<50）
- * - 🐟 摸鱼指数：EWTR 有效工作时间比率 + 四维度评分 + 减免机制
- * - ⚡ 精力水平：昼夜节律余弦模型(Process C) + HR偏差 + 疲劳累积
+ * v3 核心修正：HDS Watch 发送的 motion 数据是 userAcceleration（已去除重力），
+ * 而非 rawAccelerometer。v2 的 ENMO / EMA 重力估计 / 倾斜角全部失效。
+ *
+ * v3 算法策略：
+ * - 🏋️ 运动强度：VMUA (Vector Magnitude User Acceleration) + 编辑器活动融合
+ * - 🪑 久坐检测：VMUA 不活动阈值 + bout 判定 + 活动中断验证
+ * - 🤚 姿态感知：多信号融合（加速度模式 × 编辑器活动）→ 5 种状态
+ * - 🧘 心流检测：5维信号融合评分 + 滞回设计（沿用 v2 架构，修正信号源）
+ * - 🐟 摸鱼指数：EWTR + 四维度评分 + 减免机制（适配新姿态状态）
+ * - ⚡ 精力水平：昼夜节律余弦模型 + HR偏差 + 疲劳累积
  */
 import { EventEmitter } from 'events';
 import type {
@@ -20,72 +23,73 @@ import type {
   MotionConfig,
 } from './types';
 
-// ─── 信号处理常量 ──────────────────────────────────
+// ─── v3 信号处理常量 ──────────────────────────────
 
 /**
- * EMA 低通滤波器系数 (α)
- * 用于从原始加速度中估计重力分量
- * α = 0.1 → 保守值，1Hz 下约 10 秒收敛到真实重力方向
- * 公式: gravity_est[n] = α · raw[n] + (1−α) · gravity_est[n−1]
+ * VMUA (Vector Magnitude User Acceleration) 缓冲区大小（秒，1Hz 采样）
+ * 替代 v2 的 ENMO 缓冲区
  */
-const EMA_ALPHA = 0.1;
-
-/** ENMO 缓冲区大小（秒，1Hz 采样 → 每秒1条） */
-const ENMO_BUFFER_SIZE = 600; // 最近 10 分钟
+const VMUA_BUFFER_SIZE = 600; // 最近 10 分钟
 
 /** 原始 Motion 数据缓冲区大小 */
 const MOTION_BUFFER_SIZE = 30; // 最近 30 秒（1Hz）
 
-// ─── 运动强度常量 (GGIR/Hildebrand 标准) ────────────
+// ─── 运动强度常量 (v3 — 基于 userAcceleration) ────
 
 /**
- * ENMO 强度阈值 (单位: g)
- * 基于 Hildebrand 非惯用手腕 MVPA 切分点 + GGIR 不活动标准
- * idle:     < 30mg → 几乎不动（发呆/摸鱼）
- * light:    30-60mg → 轻微活动（鼠标/触控板）
- * moderate: 60-100mg → 中等活动（正常打字）
- * intense:  100-200mg → 高强度（快速打字/手势）
- * furious:  > 200mg → 剧烈活动（走动/大幅手部运动）
+ * VMUA 强度阈值 (单位: g)
+ *
+ * userAcceleration 典型值（来自 heart2.log 实测）：
+ *   静止: ~0.003g (传感器噪声底)
+ *   打字（非惯用手腕）: 0.003-0.01g (手腕几乎不动)
+ *   操作触控板: 0.01-0.03g
+ *   手势/伸展: 0.03-0.10g
+ *   走路: 0.10-0.50g
+ *
+ * 由于左手打字时手腕几乎不动，纯加速度无法区分"打字"和"静止"
+ * → 需要融合编辑器活动信号进行修正
  */
-const ENMO_THRESHOLDS = {
-  idle: 0.030,
-  light: 0.060,
-  moderate: 0.100,
-  intense: 0.200,
+const VMUA_THRESHOLDS = {
+  noise: 0.004,    // 传感器噪声底（低于此视为完全静止）
+  slight: 0.010,   // 轻微运动（鼠标/触控板微动）
+  moderate: 0.035,  // 中等运动（手势、调整姿势）
+  vigorous: 0.100,  // 剧烈运动（走路、大幅手部运动）
 };
 
-/** 强度计算滑动窗口大小（秒） */
-const INTENSITY_WINDOW_SEC = 5;
+/** 强度计算滑动窗口大小（秒）— v3: 缩短至 3s 加速响应 */
+const INTENSITY_WINDOW_SEC = 3;
 
-// ─── 姿态检测常量 ──────────────────────────────────
+// ─── 姿态检测常量 (v3 — 多信号融合) ──────────────
 
-/**
- * 姿态检测：静止守卫阈值 (g)
- * 仅当高通滤波后加速度幅度 < 此值时，重力估计才可信
- */
-const POSTURE_MOTION_TOLERANCE = 0.05;
+/** 编辑器活动判定阈值（CPS > 此值视为在编辑） */
+const EDITOR_ACTIVE_CPS = 0.5;
 
-/** 姿态检测：正常打字上限角度 (rad, ~20°) */
-const POSTURE_TYPING_THRESHOLD = 0.35;
-/** 姿态检测：轻微抬手上限角度 (rad, ~50°) */
-const POSTURE_RAISED_THRESHOLD = 0.87;
-/** 姿态 pitch 中位数滤波窗口 (秒) */
-const POSTURE_MEDIAN_WINDOW = 5;
+/** 编辑器近期活动窗口（秒）：在此时间内有编辑活动视为"正在编辑" */
+const EDITOR_RECENT_WINDOW_SEC = 8;
 
-// ─── 久坐检测常量 (GGIR bout 标准) ─────────────────
+/** 姿态评估滑动窗口（秒）— v3: 3s 快速响应 */
+const POSTURE_WINDOW_SEC = 3;
+
+/** 步行检测：VMUA 持续高于此值 + 节奏性 */
+const WALKING_VMUA_THRESHOLD = 0.08;
+
+/** 步行检测：需要连续 N 秒满足条件 */
+const WALKING_SUSTAIN_SEC = 3;
+
+// ─── 久坐检测常量 (v3 — 基于 VMUA) ─────────────
 
 /** 久坐检测：步数活动阈值 */
 const SEDENTARY_STEP_THRESHOLD = 5;
-/** 不活动 ENMO 阈值 (g) — GGIR 标准 40mg */
-const SEDENTARY_ENMO_THRESHOLD = 0.040;
+/** 不活动 VMUA 阈值 (g) — 低于此值视为不活动 */
+const SEDENTARY_VMUA_THRESHOLD = 0.008;
 /** 不活动 bout 容忍度（允许该比例的 epoch 超标） */
 const SEDENTARY_BOUT_TOLERANCE = 0.10;
 /** 活动中断验证：至少连续 N 秒的活动才重置久坐 */
 const ACTIVE_BREAK_DURATION = 60; // 60 秒
 /** 活动中断验证：活动 epoch 占比阈值 */
 const ACTIVE_BREAK_RATIO = 0.80;
-/** 活动中断 ENMO 阈值 (g) */
-const ACTIVE_BREAK_ENMO = 0.100;
+/** 活动中断 VMUA 阈值 (g) — 高于此值的 epoch 视为真正活跃 */
+const ACTIVE_BREAK_VMUA = 0.03;
 /** 不活动 epoch 缓冲区大小（秒） */
 const INACTIVE_EPOCH_BUFFER_SIZE = 3600; // 最近 60 分钟
 
@@ -134,42 +138,37 @@ export class MotionAnalyzer extends EventEmitter {
   // ── 数据源追踪 ──
   private hasMotionData: boolean = false; // 是否有 Motion 传感器数据（HDS）
 
-  // ── EMA 重力估计 (v2 新增) ──
-  private gravityEst: Vector3 = { x: 0, y: 0, z: -1 }; // 初始假设手腕平放
-  private gravityInitialized: boolean = false;
+  // ── VMUA 缓冲区 (v3 — 替代 ENMO) ──
+  private vmuaBuffer: number[] = [];
 
-  // ── ENMO 缓冲区 (v2 新增) ──
-  private enmoBuffer: number[] = [];
-
-  // ── 不活动 epoch 缓冲区 (v2 久坐检测用) ──
+  // ── 不活动 epoch 缓冲区 (久坐检测用) ──
   private inactiveEpochBuffer: boolean[] = [];
 
-  // ── 编辑器活动缓冲区 (v2 心流检测用) ──
+  // ── 编辑器活动缓冲区 (心流检测 + 姿态融合用) ──
   private editorActivityBuffer: number[] = []; // cps 历史
 
-  // ── 姿态估计 (v2 新增) ──
-  private lastReliablePitch: number = 0; // 最后一次可靠的倾斜角
-  private orientationReliable: boolean = false; // 当前倾斜估计是否可信
-  private pitchHistory: number[] = []; // 中位数滤波缓冲
+  // ── 行走检测 (v3 新增) ──
+  private walkingSustainStart: number | null = null; // 持续行走起始时间
 
-  // ── 心流评分 (v2 新增) ──
+  // ── 心流评分 ──
   private flowScoreHistory: number[] = []; // 最近的 FlowScore 值
   private flowCandidateStartTime: number | null = null;
   private lastFlowScoreTime: number = 0;
 
-  // ── 精力评估 (v2 新增) ──
+  // ── 精力评估 ──
   private personalHRBaseline: number = DEFAULT_HR_BASELINE;
   private sessionStartTime: number = Date.now();
 
   // ── 分析状态 ──
   private currentIntensity: CodingIntensityLevel = 'idle';
-  private currentPosture: PostureState = 'typing';
+  private currentPosture: PostureState = 'resting';
   private flowState: FlowState = { active: false, duration: 0 };
   private lastAnalysisResult: MotionAnalysisResult | null = null;
 
   // ── 计时器 ──
   private lastActiveTime: number = Date.now();
-  private raisedStartTime: number | null = null;
+  private lastSedentaryAlertTime: number = 0; // 上次久坐提醒时间（冷却用）
+  private postureAlertStartTime: number | null = null; // v3: 通用姿态告警
   private lastAnalysisTime: number = Date.now();
   private analysisTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -190,7 +189,8 @@ export class MotionAnalyzer extends EventEmitter {
   /**
    * 输入原始 Motion 数据
    *
-   * v2: 新增 EMA 重力估计 + ENMO 计算 + 不活动 epoch 判定
+   * v3: HDS 发送的是 CMDeviceMotion.userAcceleration（重力已去除）
+   * 直接计算 VMUA (Vector Magnitude of User Acceleration)
    */
   feedMotion(data: MotionData): void {
     if (!this.config.enableMotion) {
@@ -199,68 +199,32 @@ export class MotionAnalyzer extends EventEmitter {
 
     this.hasMotionData = true;
 
-    // ── 1. EMA 低通滤波器：实时估计重力方向 ──
-    // gravity_est[n] = α · raw[n] + (1−α) · gravity_est[n−1]
-    const raw = data.accelerometer;
-    if (!this.gravityInitialized) {
-      // 第一个样本直接作为初始重力估计
-      this.gravityEst = { x: raw.x, y: raw.y, z: raw.z };
-      this.gravityInitialized = true;
-    } else {
-      this.gravityEst.x = EMA_ALPHA * raw.x + (1 - EMA_ALPHA) * this.gravityEst.x;
-      this.gravityEst.y = EMA_ALPHA * raw.y + (1 - EMA_ALPHA) * this.gravityEst.y;
-      this.gravityEst.z = EMA_ALPHA * raw.z + (1 - EMA_ALPHA) * this.gravityEst.z;
+    // ── 1. 计算 VMUA ──
+    // VMUA = sqrt(x² + y² + z²)，userAcceleration 已去除重力
+    const ua = data.accelerometer;
+    const vmua = Math.sqrt(ua.x * ua.x + ua.y * ua.y + ua.z * ua.z);
+    this.vmuaBuffer.push(vmua);
+    if (this.vmuaBuffer.length > VMUA_BUFFER_SIZE) {
+      this.vmuaBuffer.shift();
     }
 
-    // ── 2. 计算 ENMO (Euclidean Norm Minus One) ──
-    // ENMO = max(||accel|| - 1.0, 0)
-    // 国际标准腕部活动量化指标 (GGIR)
-    const vm = Math.sqrt(raw.x * raw.x + raw.y * raw.y + raw.z * raw.z);
-    const enmo = Math.max(vm - 1.0, 0);
-    this.enmoBuffer.push(enmo);
-    if (this.enmoBuffer.length > ENMO_BUFFER_SIZE) {
-      this.enmoBuffer.shift();
-    }
-
-    // ── 3. 不活动 epoch 判定（久坐检测用） ──
-    const isInactive = enmo < SEDENTARY_ENMO_THRESHOLD;
+    // ── 2. 不活动 epoch 判定（久坐检测用） ──
+    const isInactive = vmua < SEDENTARY_VMUA_THRESHOLD;
     this.inactiveEpochBuffer.push(isInactive);
     if (this.inactiveEpochBuffer.length > INACTIVE_EPOCH_BUFFER_SIZE) {
       this.inactiveEpochBuffer.shift();
     }
 
-    // ── 4. 倾斜角估计（姿态检测用） ──
-    // 仅在相对静止时计算（高通分量 < 阈值 → 重力估计可信）
-    const dx = raw.x - this.gravityEst.x;
-    const dy = raw.y - this.gravityEst.y;
-    const dz = raw.z - this.gravityEst.z;
-    const hpfvm = Math.sqrt(dx * dx + dy * dy + dz * dz);
-
-    if (hpfvm < POSTURE_MOTION_TOLERANCE) {
-      // 设备相对静止，重力估计可信
-      const gnorm = Math.sqrt(
-        this.gravityEst.x * this.gravityEst.x +
-        this.gravityEst.y * this.gravityEst.y +
-        this.gravityEst.z * this.gravityEst.z
-      );
-      if (gnorm > 0.5) { // 安全校验：重力幅度应接近 1g
-        // 倾斜角: 设备平面与水平面的夹角（坐标系无关）
-        // arccos(|gz| / ||g||) → 0°=平放, 90°=竖直
-        // 不依赖具体坐标轴方向，左右手佩戴均正确
-        const tiltAngle = Math.acos(
-          Math.min(1, Math.abs(this.gravityEst.z) / gnorm)
-        );
-        this.pitchHistory.push(tiltAngle);
-        if (this.pitchHistory.length > POSTURE_MEDIAN_WINDOW) {
-          this.pitchHistory.shift();
-        }
-        this.orientationReliable = true;
+    // ── 3. 行走持续检测 ──
+    if (vmua > WALKING_VMUA_THRESHOLD) {
+      if (!this.walkingSustainStart) {
+        this.walkingSustainStart = Date.now();
       }
     } else {
-      this.orientationReliable = false;
+      this.walkingSustainStart = null;
     }
 
-    // ── 5. 保留原始 motion 缓冲（用于调试和后续分析） ──
+    // ── 4. 保留原始 motion 缓冲 ──
     this.motionBuffer.push(data);
     if (this.motionBuffer.length > MOTION_BUFFER_SIZE) {
       this.motionBuffer.shift();
@@ -440,12 +404,12 @@ export class MotionAnalyzer extends EventEmitter {
 
   /**
    * 计算敲代码强度
-   * v2: 基于 ENMO 滑动窗口均值（有 Motion 数据时）
+   * v3: 基于 VMUA + 编辑器活动融合（有 Motion 数据时）
    * 或基于编辑器字符变更速率（兼容回退方案）
    */
   private calculateCodingIntensity(): CodingIntensityLevel {
-    // 优先使用 Motion 传感器数据（HDS）— v2: 改用 ENMO 缓冲区判断
-    if (this.hasMotionData && this.enmoBuffer.length >= 3) {
+    // 优先使用 Motion 传感器数据（HDS）— v3: VMUA + 编辑器融合
+    if (this.hasMotionData && this.vmuaBuffer.length >= 3) {
       return this.calculateIntensityFromMotion();
     }
 
@@ -454,33 +418,63 @@ export class MotionAnalyzer extends EventEmitter {
   }
 
   /**
-   * 基于 Motion 传感器计算强度（HDS 模式 — v2 ENMO 标准）
+   * 基于 Motion + 编辑器融合计算强度（HDS 模式 — v3 VMUA 标准）
    *
-   * 使用 ENMO (Euclidean Norm Minus One) 作为国际标准腕部活动指标
-   * 阈值基于 GGIR/Hildebrand 研究为编程场景微调
+   * 核心创新：左手戴表打字时手腕几乎不动（VMUA 很低），
+   * 但编辑器有持续输入 → 结合编辑器 CPS 修正，避免误判为 idle。
+   *
+   * 融合逻辑：
+   * 1. 纯 VMUA 分级
+   * 2. 若 VMUA 低但编辑器活跃 → 提升等级（至少 light）
    */
   private calculateIntensityFromMotion(): CodingIntensityLevel {
-    // 取最近 N 秒的 ENMO 均值
-    const windowSize = Math.min(INTENSITY_WINDOW_SEC, this.enmoBuffer.length);
+    // 取最近 N 秒的 VMUA 均值
+    const windowSize = Math.min(INTENSITY_WINDOW_SEC, this.vmuaBuffer.length);
     if (windowSize === 0) {
       return 'idle';
     }
 
-    const recentEnmo = this.enmoBuffer.slice(-windowSize);
-    const meanEnmo = recentEnmo.reduce((sum, v) => sum + v, 0) / recentEnmo.length;
+    const recentVmua = this.vmuaBuffer.slice(-windowSize);
+    const meanVmua = recentVmua.reduce((sum, v) => sum + v, 0) / recentVmua.length;
 
-    // 根据 ENMO 均值分级（阈值单位: g）
-    if (meanEnmo < ENMO_THRESHOLDS.idle) {
-      return 'idle';
-    } else if (meanEnmo < ENMO_THRESHOLDS.light) {
-      return 'light';
-    } else if (meanEnmo < ENMO_THRESHOLDS.moderate) {
-      return 'moderate';
-    } else if (meanEnmo < ENMO_THRESHOLDS.intense) {
-      return 'intense';
+    // ── 纯 VMUA 分级 ──
+    let motionLevel: CodingIntensityLevel;
+    if (meanVmua < VMUA_THRESHOLDS.noise) {
+      motionLevel = 'idle';
+    } else if (meanVmua < VMUA_THRESHOLDS.slight) {
+      motionLevel = 'light';
+    } else if (meanVmua < VMUA_THRESHOLDS.moderate) {
+      motionLevel = 'moderate';
+    } else if (meanVmua < VMUA_THRESHOLDS.vigorous) {
+      motionLevel = 'intense';
     } else {
-      return 'furious';
+      motionLevel = 'furious';
     }
+
+    // ── 编辑器活动融合修正 ──
+    // 检查最近 N 秒内是否有编辑器活动
+    const recentEditorWindow = Math.min(
+      EDITOR_RECENT_WINDOW_SEC,
+      this.editorActivityBuffer.length
+    );
+    if (recentEditorWindow > 0) {
+      const recentEditor = this.editorActivityBuffer.slice(-recentEditorWindow);
+      const activeSecs = recentEditor.filter(cps => cps > EDITOR_ACTIVE_CPS).length;
+      const editorActiveRatio = activeSecs / recentEditor.length;
+
+      // 编辑器活跃（>30% 时间有打字）且 VMUA 低 → 提升
+      if (editorActiveRatio > 0.3 && (motionLevel === 'idle' || motionLevel === 'light')) {
+        const avgCps = recentEditor.reduce((s, v) => s + v, 0) / recentEditor.length;
+        if (avgCps > 10) {
+          motionLevel = 'moderate'; // 高速打字
+        } else if (avgCps > 3) {
+          motionLevel = 'light'; // 一般打字
+        }
+        // avgCps <= 3: 保持原 motionLevel（可能在阅读/思考）
+      }
+    }
+
+    return motionLevel;
   }
 
   /**
@@ -507,72 +501,104 @@ export class MotionAnalyzer extends EventEmitter {
   }
 
   /**
-   * 检测手腕姿态 (v2 — 基于 EMA 重力向量推算倾斜角)
+   * 检测手腕姿态 (v3 — VMUA + 编辑器活动多信号融合)
    *
-   * 原理：当腕部相对静止时，加速度计读数 ≈ 重力。
-   * EMA 低通滤波后的加速度 ≈ 重力向量方向，可反推手腕倾斜角。
+   * 5 种姿态判定逻辑（优先级从高到低）：
    *
-   * 守卫条件：仅在设备相对静止时（HPFVM < 阈值）计算倾斜角，
-   * 运动时保持上一次可靠读数。
-   *
-   * 使用 5 秒滑动中位数滤波消除噪声。
+   * 1. walking  — VMUA > 0.08g 持续 ≥3 秒（明确在走路）
+   * 2. active   — VMUA 均值 > 0.035g（手臂有明显活动）
+   * 3. typing   — VMUA 低 + 近期有编辑器活动（戴表手几乎不动但在打字）
+   * 4. mousing  — VMUA 在 slight~moderate 范围 + 无近期编辑器活动
+   * 5. resting  — VMUA 极低 + 无近期编辑器活动（静息/阅读）
    */
   private detectPosture(): PostureState {
-    if (!this.hasMotionData || this.pitchHistory.length === 0) {
-      return 'typing'; // 兼容回退：默认为正常打字姿势
+    if (!this.hasMotionData || this.vmuaBuffer.length < 3) {
+      // 兼容回退：无 Motion 数据时，根据编辑器活动判断
+      const timeSinceEdit = (Date.now() - this.lastEditorEditTime) / 1000;
+      if (this.editorCharsPerSecond > EDITOR_ACTIVE_CPS) {
+        return 'typing';
+      }
+      return timeSinceEdit < EDITOR_RECENT_WINDOW_SEC ? 'typing' : 'resting';
     }
 
-    // 中位数滤波：取 pitchHistory 的中位数作为当前 pitch
-    const sorted = [...this.pitchHistory].sort((a, b) => a - b);
-    const medianPitch = sorted[Math.floor(sorted.length / 2)];
-
-    // 更新最后可靠读数（仅在可靠时）
-    if (this.orientationReliable) {
-      this.lastReliablePitch = medianPitch;
+    // ── 1. 行走检测（最高优先级） ──
+    if (this.walkingSustainStart) {
+      const walkDuration = (Date.now() - this.walkingSustainStart) / 1000;
+      if (walkDuration >= WALKING_SUSTAIN_SEC) {
+        return 'walking';
+      }
     }
 
-    // 使用最后可靠的 pitch 判断姿态
-    const pitch = this.lastReliablePitch;
+    // ── 2. 计算 VMUA 窗口均值 ──
+    const windowSize = Math.min(POSTURE_WINDOW_SEC, this.vmuaBuffer.length);
+    const recentVmua = this.vmuaBuffer.slice(-windowSize);
+    const meanVmua = recentVmua.reduce((s, v) => s + v, 0) / recentVmua.length;
 
-    if (pitch > POSTURE_RAISED_THRESHOLD) {
-      return 'slacking'; // > 50° — 手腕大幅抬起
-    } else if (pitch > POSTURE_TYPING_THRESHOLD) {
-      return 'raised'; // 20°-50° — 手腕轻微抬起
-    } else {
-      return 'typing'; // < 20° — 手腕平放
+    // ── 3. 检查编辑器近期活动 ──
+    const editorWindow = Math.min(
+      EDITOR_RECENT_WINDOW_SEC,
+      this.editorActivityBuffer.length
+    );
+    let hasRecentEditorActivity = false;
+    if (editorWindow > 0) {
+      const recentEditor = this.editorActivityBuffer.slice(-editorWindow);
+      const activeSecs = recentEditor.filter(cps => cps > EDITOR_ACTIVE_CPS).length;
+      hasRecentEditorActivity = activeSecs / recentEditor.length > 0.2;
     }
+
+    // ── 4. 多信号融合判定 ──
+    if (meanVmua > VMUA_THRESHOLDS.moderate) {
+      return 'active'; // 手臂明显活动
+    }
+
+    if (meanVmua > VMUA_THRESHOLDS.slight) {
+      // 中等运动：可能是鼠标操作或轻微手臂调整
+      return hasRecentEditorActivity ? 'typing' : 'mousing';
+    }
+
+    // VMUA 低（手腕几乎不动）
+    if (hasRecentEditorActivity) {
+      return 'typing'; // 手腕不动但在打字（左手戴表场景的核心修正）
+    }
+
+    // 极低 VMUA + 无编辑器活动
+    return 'resting';
   }
 
   /**
-   * 久坐检测 (v2 — GGIR bout 标准)
+   * 久坐检测 (v3 — VMUA bout 标准)
    *
-   * 判定标准（基于 GGIR 国际标准）：
-   * - 不活动 bout: 连续 N 分钟中 ≥90% 的 epoch 的 ENMO < 40mg
-   * - 活动中断验证: 至少 60 秒的持续活动（≥80% epoch ENMO > 100mg）才重置计时
+   * 判定标准：
+   * - 不活动 bout: 连续 N 分钟中 ≥90% 的 epoch 的 VMUA < 阈值
+   * - 活动中断验证: 至少 60 秒的持续活动（≥80% epoch VMUA > 阈值）才重置计时
    *
    * 渐进式提醒：30分钟→轻提醒, 配置阈值→标准提醒
    */
   private checkSedentary(now: number): void {
+    // ── 冷却检查：上次提醒后需等待至少 sedentaryMinutes 才能再次提醒 ──
+    if (this.lastSedentaryAlertTime > 0 &&
+        now - this.lastSedentaryAlertTime < this.config.sedentaryMinutes * 60_000) {
+      return;
+    }
+
     const sedentaryMs = now - this.lastActiveTime;
     const sedentaryMinutes = sedentaryMs / 60_000;
 
-    // ── v2: 基于 ENMO 的 bout 判断 ──
+    // ── v3: 基于 VMUA 的 bout 判断 ──
     if (this.hasMotionData && this.inactiveEpochBuffer.length > 0) {
       // 检查最近的活动中断（是否有持续活动 → 重置久坐计时器）
       if (this.inactiveEpochBuffer.length >= ACTIVE_BREAK_DURATION) {
         const recentActive = this.inactiveEpochBuffer.slice(-ACTIVE_BREAK_DURATION);
-        // inactive=false 意味着 ENMO > 阈值 → 活跃
         const activeCount = recentActive.filter(inactive => !inactive).length;
         const activeRatio = activeCount / recentActive.length;
 
-        // 检查这些活跃 epoch 的 ENMO 是否足够大（区分打字和真正走动）
-        if (activeRatio >= ACTIVE_BREAK_RATIO && this.enmoBuffer.length >= ACTIVE_BREAK_DURATION) {
-          const recentEnmo = this.enmoBuffer.slice(-ACTIVE_BREAK_DURATION);
-          const highEnmoCount = recentEnmo.filter(e => e > ACTIVE_BREAK_ENMO).length;
-          const highEnmoRatio = highEnmoCount / recentEnmo.length;
+        // 检查这些活跃 epoch 的 VMUA 是否足够大
+        if (activeRatio >= ACTIVE_BREAK_RATIO && this.vmuaBuffer.length >= ACTIVE_BREAK_DURATION) {
+          const recentVmua = this.vmuaBuffer.slice(-ACTIVE_BREAK_DURATION);
+          const highVmuaCount = recentVmua.filter(v => v > ACTIVE_BREAK_VMUA).length;
+          const highVmuaRatio = highVmuaCount / recentVmua.length;
 
-          if (highEnmoRatio >= ACTIVE_BREAK_RATIO) {
-            // 确认是真正的活动中断 → 重置
+          if (highVmuaRatio >= ACTIVE_BREAK_RATIO) {
             this.lastActiveTime = now;
             return;
           }
@@ -597,7 +623,7 @@ export class MotionAnalyzer extends EventEmitter {
             duration: sedentaryMs,
             highHeartRate: isHighHr,
           });
-          this.lastActiveTime = now;
+          this.lastSedentaryAlertTime = now; // 标记提醒时间（冷却），不重置 lastActiveTime
           return;
         }
       }
@@ -610,43 +636,46 @@ export class MotionAnalyzer extends EventEmitter {
         duration: sedentaryMs,
         highHeartRate: isHighHr,
       });
-      this.lastActiveTime = now;
+      this.lastSedentaryAlertTime = now; // 标记提醒时间（冷却），不重置 lastActiveTime
     }
   }
 
   /**
-   * 姿态告警检测（抬手摸鱼）
+   * 姿态告警检测 (v3 — 基于 active/walking 持续时间)
+   *
+   * 当用户持续处于 active 或 walking 状态超过阈值时发出告警
+   * （可能在开会、走神、不在工位等）
    */
   private checkPostureAlert(now: number): void {
-    if (this.currentPosture === 'raised' || this.currentPosture === 'slacking') {
-      if (!this.raisedStartTime) {
-        this.raisedStartTime = now;
+    if (this.currentPosture === 'active' || this.currentPosture === 'walking') {
+      if (!this.postureAlertStartTime) {
+        this.postureAlertStartTime = now;
       }
 
-      const raisedDuration = now - this.raisedStartTime;
+      const alertDuration = now - this.postureAlertStartTime;
       const thresholdMs = this.config.postureAlertSeconds * 1000;
 
-      if (raisedDuration >= thresholdMs) {
+      if (alertDuration >= thresholdMs) {
         this.emit('postureAlert', {
-          duration: raisedDuration,
+          duration: alertDuration,
           state: this.currentPosture,
         });
 
         // 重置计时（避免频繁提醒）
-        this.raisedStartTime = now;
+        this.postureAlertStartTime = now;
       }
     } else {
-      // 放下手腕 → 重置
-      this.raisedStartTime = null;
+      // 回到工作姿态 → 重置
+      this.postureAlertStartTime = null;
     }
   }
 
   /**
-   * 心流状态检测 (v2 — 多信号融合评分 + 滞回设计)
+   * 心流状态检测 (v3 — 多信号融合评分 + 滞回设计)
    *
    * 5 维信号融合评分 (0-100):
    *   1. 打字持续性 (35%) — 最近 5 分钟编辑器活动的持续性
-   *   2. 动作稳定性 (20%) — ENMO 在打字模式范围内且稳定
+   *   2. 动作稳定性 (20%) — VMUA 在打字模式范围内且稳定
    *   3. 心率稳定性 (15%) — 心率变异系数
    *   4. 持续时间加成 (20%) — 持续满足条件越久分数越高
    *   5. 中断惩罚 (10%) — 编辑器空闲中断
@@ -759,34 +788,34 @@ export class MotionAnalyzer extends EventEmitter {
   }
 
   /**
-   * 计算动作稳定性 (0-1)
+   * 计算动作稳定性 (0-1) — v3 使用 VMUA
    * 打字时腕部有规律的小幅振动但无大幅运动
    */
   private calculateMotionStillness(): number {
-    if (!this.hasMotionData || this.enmoBuffer.length < 30) {
+    if (!this.hasMotionData || this.vmuaBuffer.length < 30) {
       return 0.5; // 无数据时给中间值
     }
 
-    const recent = this.enmoBuffer.slice(-FLOW_TYPING_WINDOW);
+    const recent = this.vmuaBuffer.slice(-FLOW_TYPING_WINDOW);
     const mean = recent.reduce((s, v) => s + v, 0) / recent.length;
     const variance = recent.reduce((s, v) => s + (v - mean) ** 2, 0) / recent.length;
     const std = Math.sqrt(variance);
 
-    // 有轻微但稳定的动作 = 打字模式
-    // ENMO 均值在 0.02-0.15g 且 标准差 < 0.05g
-    if (mean > 0.02 && mean < 0.15 && std < 0.05) {
-      return 1.0 - Math.min(1, Math.max(0, (std - 0.01) / 0.04));
+    // v3: VMUA 是用户加速度（无重力），典型打字范围 0.003-0.010g
+    // 稳定的低幅运动 = 打字模式
+    if (mean < VMUA_THRESHOLDS.slight && std < 0.005) {
+      return 1.0; // 极稳定，可能在打字或静息
     }
-    // v2 fix: 极静止场景（ENMO < 0.02g）可能是深度思考/阅读，给中间分数
-    if (mean <= 0.02 && std < 0.02) {
-      return 0.5;
+    if (mean < VMUA_THRESHOLDS.moderate && std < 0.015) {
+      return 0.8 - Math.min(0.3, std / 0.015 * 0.3); // 轻微运动
     }
-    return 0;
+    // 大幅运动 → 低稳定性
+    return Math.max(0, 0.3 - mean * 2);
   }
 
   /**
    * 判断心率稳定性 (0-1)
-   * v2: 基于变异系数 (CV)，使用 5 分钟窗口
+   * 基于变异系数 (CV)，使用 5 分钟窗口
    */
   private calculateHRStability(): number {
     if (this.heartRateHistory.length < 10) {
@@ -809,10 +838,10 @@ export class MotionAnalyzer extends EventEmitter {
    */
   private emitAnalysisResult(now: number): void {
     const sedentaryDuration = now - this.lastActiveTime;
-    const raisedDuration = this.raisedStartTime ? now - this.raisedStartTime : 0;
+    const postureAlertDuration = this.postureAlertStartTime ? now - this.postureAlertStartTime : 0;
 
     // 计算摸鱼指数（0-100）
-    const slackingIndex = this.calculateSlackingIndex(raisedDuration, sedentaryDuration);
+    const slackingIndex = this.calculateSlackingIndex(postureAlertDuration, sedentaryDuration);
 
     // 计算精力水平（0-100，简化版）
     const energyLevel = this.calculateEnergyLevel();
@@ -823,7 +852,7 @@ export class MotionAnalyzer extends EventEmitter {
       flowState: { ...this.flowState }, // 浅拷贝避免引用泄漏
       slackingIndex,
       energyLevel,
-      raisedDuration,
+      postureAlertDuration,
       sedentaryDuration,
     };
 
@@ -832,17 +861,17 @@ export class MotionAnalyzer extends EventEmitter {
   }
 
   /**
-   * 计算摸鱼指数 (v2 — EWTR + 四维度评分 + 减免机制)
+   * 计算摸鱼指数 (v3 — EWTR + 四维度评分 + 减免机制)
    *
    * 四维度评分:
    *   1. 工作不活跃度 (0-40) — 基于 EWTR 有效工作时间比率
-   *   2. 姿态异常 (0-25) — 抬手/摸鱼姿态
+   *   2. 姿态异常 (0-25) — 非工作姿态（走动/活动/静息等）
    *   3. 久坐程度 (0-20) — 久坐持续时间
    *   4. 编辑器空闲度 (0-15) — 编辑器无操作时间
    *
    * 减免: 心流状态(-30), 高强度工作(-20)
    */
-  private calculateSlackingIndex(raisedDuration: number, sedentaryDuration: number): number {
+  private calculateSlackingIndex(postureAlertDuration: number, sedentaryDuration: number): number {
     // ── 维度 1: 工作不活跃度 (0-40) ──
     // 基于 EWTR (Effective Work Time Ratio)
     let inactivityScore = 0;
@@ -869,14 +898,15 @@ export class MotionAnalyzer extends EventEmitter {
     }
 
     // ── 维度 2: 姿态异常 (0-25) ──
-    // 仅在姿态数据可靠时计分；无 motion 数据时（兼容模式）姿态默认 typing，不计分
-    // 有 motion 但倾斜角不可靠时（设备运动中）也不计分，避免误判
+    // v3: 5 种姿态评分
     let postureScore = 0;
-    if (this.hasMotionData && this.orientationReliable) {
-      if (this.currentPosture === 'slacking') {
-        postureScore = 25;
-      } else if (this.currentPosture === 'raised') {
-        postureScore = 15;
+    if (this.hasMotionData) {
+      switch (this.currentPosture) {
+        case 'walking': postureScore = 25; break;  // 明确不在工位
+        case 'active': postureScore = 15; break;    // 手臂大幅活动，可能不在工作
+        case 'mousing': postureScore = 5; break;    // 可能在浏览网页
+        case 'typing': postureScore = 0; break;     // 正在工作
+        case 'resting': postureScore = 10; break;   // 可能在思考也可能在发呆
       }
     }
 
@@ -905,7 +935,7 @@ export class MotionAnalyzer extends EventEmitter {
   }
 
   /**
-   * 计算精力水平 (v2 — 昼夜节律 + HR偏差 + 疲劳累积)
+   * 计算精力水平 (昼夜节律 + HR偏差 + 疲劳累积)
    *
    * 四因子模型:
    *   1. 昼夜节律基线 (Process C 简化版) — 基于 Borbély 双过程模型

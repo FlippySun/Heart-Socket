@@ -185,7 +185,7 @@
           "properties": {
             "deepRelax": {
               "type": "number",
-              "description": "深度放松上限（深度休息、冒想）"
+              "description": "深度放松上限（深度休息、冥想）"
             },
             "relax": {
               "type": "number",

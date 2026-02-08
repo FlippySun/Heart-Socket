@@ -46,6 +46,8 @@ export class HeartRateManager {
   private motionAnalyzer: MotionAnalyzer;
   private editorActivityTracker: EditorActivityTracker;
   private sedentaryReminderTimer: ReturnType<typeof setTimeout> | null = null;
+  private sedentaryAlertShowing: boolean = false; // 防重复弹窗
+  private postureAlertShowing: boolean = false;   // 防重复弹窗
   private config: HeartSocketConfig;
   private disposables: vscode.Disposable[] = [];
   private context: vscode.ExtensionContext;
@@ -409,7 +411,7 @@ export class HeartRateManager {
 
     // 打开 Pulsoid Token 页面
     const openBrowser = await vscode.window.showInformationMessage(
-      'Pulsoid: 需要获取 Access Token。点击"获取 Token"将打开浏览器，登录后复制你的 Token。',
+      'Pulsoid: 需要获取 Access Token。点击"获取 Token"将打开浏览器，登录后复制您的 Token。',
       '获取 Token',
       '我已有 Token'
     );
@@ -452,7 +454,7 @@ export class HeartRateManager {
   private async guideHypeRateSetup(): Promise<boolean> {
     // 提示费用门槛
     const proceed = await vscode.window.showWarningMessage(
-      'HypeRate API 需要商业开发者权限（€1,900/年）。如果你没有 API Token，建议使用 HDS 或 Pulsoid 方案。',
+      'HypeRate API 需要商业开发者权限（€1,900/年）。如果您没有 API Token，建议使用 HDS 或 Pulsoid 方案。',
       '我有 API Token',
       '返回选择'
     );
@@ -677,7 +679,7 @@ export class HeartRateManager {
           slackingIndex: motionResult.slackingIndex,
           energyLevel: motionResult.energyLevel,
           sedentaryDuration: motionResult.sedentaryDuration,
-          raisedDuration: motionResult.raisedDuration,
+          postureAlertDuration: motionResult.postureAlertDuration,
         } : null,
 
         // 健康数据
@@ -774,6 +776,18 @@ export class HeartRateManager {
 
     provider.on('error', (error: Error) => {
       this.log(`错误: ${error.message}`);
+
+      // 端口占用时给出友好提示
+      if (error.message.includes('EADDRINUSE')) {
+        vscode.window.showErrorMessage(
+          `Heart Socket: 端口 ${this.config.serverPort} 已被占用，请在设置中修改 heartSocket.serverPort 或关闭占用该端口的程序。`,
+          '打开设置'
+        ).then(action => {
+          if (action === '打开设置') {
+            vscode.commands.executeCommand('workbench.action.openSettings', 'heartSocket.serverPort');
+          }
+        });
+      }
     });
 
     provider.on('log', (msg: string) => {
@@ -1645,7 +1659,7 @@ export class HeartRateManager {
     .chart-time-axis {
       display: flex;
       justify-content: space-between;
-      font-size: 10px;
+      font-size: 11px;
       opacity: 0.45;
       margin-top: 2px;
       padding: 0 2px;
@@ -2327,9 +2341,11 @@ export class HeartRateManager {
       furious:  { icon: '🚀', label: '疯狂打字' },
     };
     const postureMap = {
+      resting:  { icon: '😴', label: '静息' },
       typing:   { icon: '⌨️', label: '打字中' },
-      raised:   { icon: '🖐️', label: '抬手' },
-      slacking: { icon: '🤔', label: '摸鱼' },
+      mousing:  { icon: '🖱️', label: '鼠标操作' },
+      active:   { icon: '💪', label: '活动中' },
+      walking:  { icon: '🚶', label: '走动' },
     };
 
     // 当前时间尺度（秒）— 从 select 选中项读取（由 TS 层动态设置 selected）
@@ -2421,8 +2437,8 @@ export class HeartRateManager {
       var areaPoints = firstX.toFixed(1) + ',' + svgH + ' ' + points + ' ' + lastX.toFixed(1) + ',' + svgH;
       $('chartArea').setAttribute('points', areaPoints);
 
-      $('chartMin').textContent = minBpm + ' BPM';
-      $('chartMax').textContent = maxBpm + ' BPM';
+      $('chartMin').textContent = Math.round(Math.min.apply(null, bpmArr)) + ' BPM';
+      $('chartMax').textContent = Math.round(Math.max.apply(null, bpmArr)) + ' BPM';
 
       // 时间刻度标签（5 个等距刻度）
       var axisEl = $('chartTimeAxis');
@@ -2498,8 +2514,8 @@ export class HeartRateManager {
         { icon: '🔥', label: '卡路里',  value: s.calories !== undefined ? s.calories + ' kcal' : '--', color: '#ff5722' },
         { icon: '👟', label: '步数',     value: s.stepCount !== undefined ? s.stepCount : '--', color: '#4caf50' },
         { icon: '🩸', label: '血氧',     value: s.bloodOxygen !== undefined ? s.bloodOxygen + '%' : '--', color: '#e91e63' },
-        { icon: '📏', label: '距离',     value: s.distance !== undefined ? s.distance.toFixed(2) + ' km' : '--', color: '#2196f3' },
-        { icon: '⚡', label: '速度',     value: s.speed !== undefined ? s.speed.toFixed(1) + ' km/h' : '--', color: '#ff9800' },
+        { icon: '📏', label: '距离',     value: s.distance !== undefined ? (s.distance >= 1000 ? (s.distance / 1000).toFixed(2) + ' km' : s.distance.toFixed(0) + ' m') : '--', color: '#2196f3' },
+        { icon: '⚡', label: '速度',     value: s.speed !== undefined ? (s.speed * 3.6).toFixed(1) + ' km/h' : '--', color: '#ff9800' },
         { icon: '⚖️', label: '体重',    value: s.bodyMass !== undefined ? s.bodyMass.toFixed(1) + ' kg' : '--', color: '#9c27b0' },
         { icon: '📐', label: 'BMI',      value: s.bmi !== undefined ? s.bmi.toFixed(1) : '--', color: '#00bcd4' },
       ];
@@ -2544,7 +2560,9 @@ export class HeartRateManager {
       $('durationVal').textContent = d.durationStr || '0s';
 
       // 趋势图
-      updateChart(d.chartData);
+      if (d.chartData && d.chartData.length > 0) {
+        updateChart(d.chartData);
+      }
 
       // 饼图：区间分布
       updatePieChart(d.zoneDistribution, d.zoneLabels, d.zoneColors);
@@ -2826,7 +2844,7 @@ export class HeartRateManager {
       // Motion 分析
       if (motion) {
         var motionRows = [];
-        var postureMap = {typing:'\u2328\ufe0f \u6253\u5b57\u4e2d',raised:'\ud83d\udd90\ufe0f \u62ac\u624b',slacking:'\ud83e\udd14 \u6478\u9c7c'};
+        var postureMap = {resting:'\ud83d\ude34 \u9759\u606f',typing:'\u2328\ufe0f \u6253\u5b57\u4e2d',mousing:'\ud83d\uddb1\ufe0f \u9f20\u6807\u64cd\u4f5c',active:'\ud83d\udcaa \u6d3b\u52a8\u4e2d',walking:'\ud83d\udeb6 \u8d70\u52a8'};
         var intensityMap = {idle:'\ud83d\udca4 \u7a7a\u95f2',light:'\ud83d\udca1 \u8f7b\u5ea6',moderate:'\u26a1 \u4e2d\u7b49',intense:'\ud83d\udd25 \u9ad8\u5f3a\u5ea6'};
 
         if (!isCompatMode && motion.codingIntensity) {
@@ -2866,8 +2884,8 @@ export class HeartRateManager {
         if (health.calories != null) healthRows.push('<div class="detail-stat-row"><span class="detail-stat-label">\ud83d\udd25 \u5361\u8def\u91cc</span><span class="detail-stat-value">' + health.calories + ' kcal</span></div>');
         if (health.stepCount != null) healthRows.push('<div class="detail-stat-row"><span class="detail-stat-label">\ud83d\udc5f \u6b65\u6570</span><span class="detail-stat-value">' + health.stepCount + '</span></div>');
         if (health.bloodOxygen != null) healthRows.push('<div class="detail-stat-row"><span class="detail-stat-label">\ud83e\ude78 \u8840\u6c27</span><span class="detail-stat-value">' + health.bloodOxygen + '%</span></div>');
-        if (health.distance != null) healthRows.push('<div class="detail-stat-row"><span class="detail-stat-label">\ud83d\udccf \u8ddd\u79bb</span><span class="detail-stat-value">' + health.distance.toFixed(2) + ' km</span></div>');
-        if (health.speed != null) healthRows.push('<div class="detail-stat-row"><span class="detail-stat-label">\u26a1 \u901f\u5ea6</span><span class="detail-stat-value">' + health.speed.toFixed(1) + ' km/h</span></div>');
+        if (health.distance != null) healthRows.push('<div class="detail-stat-row"><span class="detail-stat-label">\ud83d\udccf \u8ddd\u79bb</span><span class="detail-stat-value">' + (health.distance >= 1000 ? (health.distance / 1000).toFixed(2) + ' km' : health.distance.toFixed(0) + ' m') + '</span></div>');
+        if (health.speed != null) healthRows.push('<div class="detail-stat-row"><span class="detail-stat-label">\u26a1 \u901f\u5ea6</span><span class="detail-stat-value">' + (health.speed * 3.6).toFixed(1) + ' km/h</span></div>');
         if (health.bodyMass != null) healthRows.push('<div class="detail-stat-row"><span class="detail-stat-label">\u2696\ufe0f \u4f53\u91cd</span><span class="detail-stat-value">' + health.bodyMass + ' kg</span></div>');
         if (health.bmi != null) healthRows.push('<div class="detail-stat-row"><span class="detail-stat-label">\ud83d\udcd0 BMI</span><span class="detail-stat-value">' + health.bmi.toFixed(1) + '</span></div>');
         if (healthRows.length > 0) {
@@ -2938,6 +2956,12 @@ export class HeartRateManager {
   // ============================================================================
 
   private showSedentaryAlert(duration: number, highHeartRate: boolean): void {
+    // 防重复：已有弹窗显示中则跳过
+    if (this.sedentaryAlertShowing) {
+      return;
+    }
+    this.sedentaryAlertShowing = true;
+
     const durationMinutes = Math.floor(duration / 60000);
     const message = highHeartRate
       ? `🪑 已久坐 ${durationMinutes} 分钟，且检测到心率异常偏高。建议起身活动一下！`
@@ -2946,6 +2970,7 @@ export class HeartRateManager {
     vscode.window
       .showWarningMessage(message, '稍后提醒', '我知道了')
       .then((selection) => {
+        this.sedentaryAlertShowing = false;
         if (selection === '稍后提醒') {
           // 清理之前的提醒定时器
           if (this.sedentaryReminderTimer) {
@@ -2964,21 +2989,29 @@ export class HeartRateManager {
   }
 
   private showPostureAlert(duration: number, state: PostureState): void {
+    // 防重复：已有弹窗显示中则跳过
+    if (this.postureAlertShowing) {
+      return;
+    }
+
     const durationSeconds = Math.floor(duration / 1000);
     let message = '';
 
     switch (state) {
-      case 'raised':
-        message = `🖐️ 检测到您的手腕持续抬起 ${durationSeconds} 秒。注意保持正确的打字姿势！`;
+      case 'active':
+        message = `💪 检测到您的手臂持续活动 ${durationSeconds} 秒。注意保持正确的打字姿势！`;
         break;
-      case 'slacking':
-        message = `🤔 检测到可能的摸鱼姿势持续 ${durationSeconds} 秒。适当休息后记得回到工作状态哦~`;
+      case 'walking':
+        message = `🚶 检测到您可能已离开工位 ${durationSeconds} 秒。适当走动后记得回到工作状态哦~`;
         break;
       default:
-        return; // 正常打字姿势不提醒
+        return; // 其他姿势不提醒
     }
 
-    vscode.window.showInformationMessage(message, '收到');
+    this.postureAlertShowing = true;
+    vscode.window.showInformationMessage(message, '收到').then(() => {
+      this.postureAlertShowing = false;
+    });
   }
 
   private onFlowStateChange(state: FlowState): void {
