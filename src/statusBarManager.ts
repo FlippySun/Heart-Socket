@@ -82,6 +82,18 @@ export class StatusBarManager {
   // 心率统计摘要（用于 tooltip 显示）
   private heartRateStats: { min: number; max: number; avg: number } | null = null;
 
+  // 监测时长（毫秒）
+  private sessionDuration: number = 0;
+
+  // 缓存：避免重复赋值相同内容导致 VS Code 状态栏重渲染 → 悬浮框闪烁
+  private cachedText: string = '';
+  private cachedTooltip: string = '';
+  private lastSetZone: HeartRateZoneName = 'calm'; // color 缓存（仅 zone 变化时更新 color）
+
+  // tooltip 独立低频更新（防闪烁核心）
+  private tooltipDirty: boolean = false;
+  private tooltipTimer: ReturnType<typeof setInterval> | null = null;
+
   /** 节流：最小更新间隔 (ms) */
   private lastUpdateTime: number = 0;
   private readonly UPDATE_THROTTLE = 500;
@@ -123,10 +135,7 @@ export class StatusBarManager {
    */
   updateHealthSnapshot(snapshot: HealthSnapshot): void {
     this.healthSnapshot = snapshot;
-    // 只更新 tooltip，不触发主文本重渲染
-    if (this.lastBpm > 0) {
-      this.statusBarItem.tooltip = this.buildTooltip();
-    }
+    this.tooltipDirty = true;
   }
 
   /**
@@ -139,10 +148,12 @@ export class StatusBarManager {
     switch (status) {
       case ConnectionStatus.Disconnected:
         this.stopAnimation();
+        this.stopTooltipTimer();
         this.showDisconnected();
         break;
       case ConnectionStatus.Connecting:
         this.stopAnimation();
+        this.stopTooltipTimer();
         this.showConnecting();
         break;
       case ConnectionStatus.Connected:
@@ -150,9 +161,11 @@ export class StatusBarManager {
         if (this.config.showHeartbeatAnimation) {
           this.startAnimation();
         }
+        this.startTooltipTimer();
         break;
       case ConnectionStatus.Reconnecting:
         this.stopAnimation();
+        this.stopTooltipTimer();
         if (context?.waitingForDevice) {
           this.showWaitingForDevice();
         } else {
@@ -161,6 +174,7 @@ export class StatusBarManager {
         break;
       case ConnectionStatus.Error:
         this.stopAnimation();
+        this.stopTooltipTimer();
         this.showError();
         break;
     }
@@ -179,10 +193,7 @@ export class StatusBarManager {
    */
   updateMotionAnalysis(result: MotionAnalysisResult): void {
     this.motionAnalysis = result;
-    // 仅更新 tooltip，不触发主文本重渲染
-    if (this.lastBpm > 0) {
-      this.statusBarItem.tooltip = this.buildTooltip();
-    }
+    this.tooltipDirty = true;
   }
 
   /**
@@ -190,6 +201,14 @@ export class StatusBarManager {
    */
   updateHeartRateStats(stats: { min: number; max: number; avg: number }): void {
     this.heartRateStats = stats;
+    this.tooltipDirty = true;
+  }
+
+  /**
+   * 更新监测时长（毫秒）
+   */
+  updateSessionDuration(duration: number): void {
+    this.sessionDuration = duration;
   }
 
   /**
@@ -208,6 +227,7 @@ export class StatusBarManager {
    */
   dispose(): void {
     this.stopAnimation();
+    this.stopTooltipTimer();
     if (this.pendingUpdate) {
       clearTimeout(this.pendingUpdate);
       this.pendingUpdate = null;
@@ -237,23 +257,51 @@ export class StatusBarManager {
   }
 
   /**
-   * 渲染心率显示
+   * 渲染心率显示（文本 + 颜色 + tooltip，均走缓存对比）
    */
   private renderHeartRate(): void {
+    // 更新文本（含动画图标）
+    this.renderText();
+    // 更新颜色（仅在 zone 真正变化时才赋值，避免无谓的 setter 触发重渲染）
+    if (this.lastZone !== this.lastSetZone) {
+      this.lastSetZone = this.lastZone;
+      this.statusBarItem.color = ZONE_COLORS[this.lastZone];
+    }
+    // 标记 tooltip 需要更新，由独立低频定时器刷新（不在此处直接赋值）
+    this.tooltipDirty = true;
+  }
+
+  /**
+   * 仅渲染状态栏文本（心跳动画用，不触碰 tooltip / color）
+   */
+  private renderText(): void {
     const icon = this.config.showHeartbeatAnimation
       ? HEART_ICONS[this.animationFrame % HEART_ICONS.length]
       : HEART_ICONS[0];
 
-    // 主显示：心率 + 敲代码强度（可选）
     let text = `${icon} ${this.lastBpm} BPM`;
     if (this.config.showCodingIntensity && this.codingIntensity !== 'idle') {
       const intensityIcon = CODING_INTENSITY_ICONS[this.codingIntensity];
       text += ` ${intensityIcon}`;
     }
 
-    this.statusBarItem.text = text;
-    this.statusBarItem.color = ZONE_COLORS[this.lastZone];
-    this.statusBarItem.tooltip = this.buildTooltip();
+    this.setTextIfChanged(text);
+  }
+
+  /** 仅当 text 变化时赋值，避免触发 VS Code 重渲染 */
+  private setTextIfChanged(text: string): void {
+    if (text !== this.cachedText) {
+      this.cachedText = text;
+      this.statusBarItem.text = text;
+    }
+  }
+
+  /** 仅当 tooltip 内容变化时赋值，避免悬浮框闪烁 */
+  private setTooltipIfChanged(tooltip: string): void {
+    if (tooltip !== this.cachedTooltip) {
+      this.cachedTooltip = tooltip;
+      this.statusBarItem.tooltip = tooltip;
+    }
   }
 
   /**
@@ -274,6 +322,19 @@ export class StatusBarManager {
       const minDisplay = min === Infinity ? '--' : min;
       const maxDisplay = max === -Infinity ? '--' : max;
       lines.push(`📉 最低/最高/平均: ${minDisplay} / ${maxDisplay} / ${avg} BPM`);
+    }
+
+    // 添加监测时长（精确到分钟，避免每秒变化导致 tooltip 高频刷新）
+    if (this.sessionDuration > 0) {
+      const totalSec = Math.floor(this.sessionDuration / 1000);
+      const h = Math.floor(totalSec / 3600);
+      const m = Math.floor((totalSec % 3600) / 60);
+      const durStr = h > 0
+        ? `${h} 小时 ${m} 分钟`
+        : m > 0
+          ? `${m} 分钟`
+          : '不到 1 分钟';
+      lines.push(`⏱️ 监测时长: ${durStr}`);
     }
 
     // 添加敲代码强度
@@ -355,13 +416,13 @@ export class StatusBarManager {
     const s = this.healthSnapshot;
 
     if (s.calories !== undefined) {
-      lines.push(`🔥 卡路里: ${s.calories} kcal`);
+      lines.push(`🔥 卡路里: ${Math.round(s.calories)} kcal`);
     }
     if (s.stepCount !== undefined) {
-      lines.push(`👟 步数: ${s.stepCount}`);
+      lines.push(`👟 步数: ${Math.round(s.stepCount)}`);
     }
     if (s.bloodOxygen !== undefined) {
-      lines.push(`🩸 血氧: ${s.bloodOxygen}%`);
+      lines.push(`🩸 血氧: ${Number(s.bloodOxygen).toFixed(1)}%`);
     }
     if (s.distance !== undefined) {
       lines.push(`📏 距离: ${s.distance.toFixed(2)} km`);
@@ -370,7 +431,7 @@ export class StatusBarManager {
       lines.push(`⚡ 速度: ${s.speed.toFixed(1)} km/h`);
     }
     if (s.bodyMass !== undefined) {
-      lines.push(`⚖️ 体重: ${s.bodyMass} kg`);
+      lines.push(`⚖️ 体重: ${Number(s.bodyMass).toFixed(1)} kg`);
     }
     if (s.bmi !== undefined) {
       lines.push(`📐 BMI: ${s.bmi.toFixed(1)}`);
@@ -415,7 +476,7 @@ export class StatusBarManager {
     this.animationTimer = setInterval(() => {
       this.animationFrame++;
       if (this.lastBpm > 0) {
-        this.renderHeartRate();
+        this.renderText(); // 仅切换心跳图标，不触碰 tooltip/color
       }
     }, 800); // 每 800ms 切换一次图标，模拟心跳
   }
@@ -425,6 +486,35 @@ export class StatusBarManager {
       clearInterval(this.animationTimer);
       this.animationTimer = null;
     }
+  }
+
+  /**
+   * 启动 tooltip 独立低频更新定时器
+   * 与心跳动画/心率数据解耦，每 5 秒最多更新一次 tooltip
+   */
+  private startTooltipTimer(): void {
+    this.stopTooltipTimer();
+    // 立即刷新一次
+    this.flushTooltip();
+    // 每 5 秒检查 dirty 标志并更新
+    this.tooltipTimer = setInterval(() => {
+      this.flushTooltip();
+    }, 5000);
+  }
+
+  private stopTooltipTimer(): void {
+    if (this.tooltipTimer) {
+      clearInterval(this.tooltipTimer);
+      this.tooltipTimer = null;
+    }
+  }
+
+  /** 刷新 tooltip（仅在有数据且内容变化时赋值） */
+  private flushTooltip(): void {
+    if (this.lastBpm > 0) {
+      this.setTooltipIfChanged(this.buildTooltip());
+    }
+    this.tooltipDirty = false;
   }
 
   // ─── 状态显示 ───────────────────────────────────

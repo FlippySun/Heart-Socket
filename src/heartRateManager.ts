@@ -851,6 +851,9 @@ export class HeartRateManager {
     this.stats.avg = Math.round(this.bpmSum / this.stats.samples);
     this.stats.duration = Date.now() - this.sessionStartTime;
 
+    // 持久化监测时长到 dataStore（确保历史面板能读到非零时长）
+    this.dataStore.updateDuration(this.stats.duration);
+
     // 保存历史记录（环形缓冲）
     this.stats.history.push(data);
     if (this.stats.history.length > MAX_HISTORY_SIZE) {
@@ -866,6 +869,9 @@ export class HeartRateManager {
       max: this.stats.max,
       avg: this.stats.avg,
     });
+
+    // 更新状态栏监测时长
+    this.statusBar.updateSessionDuration(this.stats.duration);
 
     // 检查告警
     this.alertManager.check(data);
@@ -1161,12 +1167,16 @@ export class HeartRateManager {
    */
   private pushDaySummary(date: string): void {
     if (!this.statsPanel) { return; }
-    const summary = this.dataStore.getSummary(date);
 
     // 仅当请求的是今天时附带实时 motion 和健康数据
     const now = new Date();
     const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
     const isToday = date === todayStr;
+
+    // 今天使用实时数据（已规范化百分比），历史日用持久化数据
+    const summary = isToday
+      ? this.dataStore.getLiveSummary()
+      : this.dataStore.getSummary(date);
     const motionResult = isToday ? this.motionAnalyzer.getLatestResult() : null;
     const healthSnap = isToday ? this.healthSnapshot : null;
 
@@ -1652,7 +1662,7 @@ export class HeartRateManager {
     .chart-labels {
       display: flex;
       justify-content: space-between;
-      font-size: 11px;
+      font-size: 9px;
       opacity: 0.5;
       margin-top: 4px;
     }
@@ -2785,20 +2795,37 @@ export class HeartRateManager {
       if (summary.zoneDistribution) {
         html += '<div class="detail-section-label">\ud83c\udfaf \u533a\u95f4\u5206\u5e03</div>';
         var zoneKeys = ['low','deepRelax','relax','calm','lightFocus','focused','tense','stressed','extreme'];
-        var maxPct = 0;
+        // 第一遍：收集有效区间及其原始百分比，计算整数百分比
+        var zoneEntries = [];
         for (var zi = 0; zi < zoneKeys.length; zi++) {
           var zv = summary.zoneDistribution[zoneKeys[zi]] || 0;
-          if (zv > maxPct) maxPct = zv;
+          if (zv > 0) {
+            zoneEntries.push({ key: zoneKeys[zi], pct: zv, intPct: Math.floor(zv), remainder: zv - Math.floor(zv) });
+          }
         }
-        for (var zi = 0; zi < zoneKeys.length; zi++) {
-          var zk = zoneKeys[zi];
-          var zpct = summary.zoneDistribution[zk] || 0;
-          if (zpct <= 0) continue;
-          var barW = maxPct > 0 ? (zpct / maxPct) * 100 : 0;
+        // 最大余额法：确保整数百分比之和为 100%
+        var intSum = 0;
+        for (var ze = 0; ze < zoneEntries.length; ze++) intSum += zoneEntries[ze].intPct;
+        var diff100 = 100 - intSum;
+        if (diff100 > 0 && zoneEntries.length > 0) {
+          // 按余数降序排列，将缺少的百分点分配给余数最大的区间
+          var sorted = zoneEntries.slice().sort(function(a, b) { return b.remainder - a.remainder; });
+          for (var ri = 0; ri < diff100 && ri < sorted.length; ri++) sorted[ri].intPct++;
+        }
+        // 渲染
+        var maxPct = 0;
+        for (var ze = 0; ze < zoneEntries.length; ze++) {
+          if (zoneEntries[ze].intPct > maxPct) maxPct = zoneEntries[ze].intPct;
+        }
+        for (var ze = 0; ze < zoneEntries.length; ze++) {
+          var zk = zoneEntries[ze].key;
+          var zpctInt = zoneEntries[ze].intPct;
+          if (zpctInt <= 0) continue;
+          var barW = maxPct > 0 ? (zpctInt / maxPct) * 100 : 0;
           html += '<div class="detail-zone-row">' +
             '<span class="detail-zone-name">' + (zoneNameMap[zk] || zk) + '</span>' +
             '<div class="detail-zone-bar-bg"><div class="detail-zone-bar-fill" style="width:' + barW.toFixed(0) + '%;background:' + (zoneColorMap[zk] || '#888') + '"></div></div>' +
-            '<span class="detail-zone-pct">' + zpct.toFixed(0) + '%</span>' +
+            '<span class="detail-zone-pct">' + zpctInt + '%</span>' +
             '</div>';
         }
       }
@@ -2808,7 +2835,7 @@ export class HeartRateManager {
         html += '<div class="detail-section-label">\ud83d\udd70\ufe0f \u6d3b\u8dc3\u65f6\u6bb5</div><div class="detail-hours">';
         for (var h = 0; h < 24; h++) {
           if (summary.hourlyAvg[h] !== null && summary.hourlyAvg[h] !== undefined) {
-            html += '<span class="detail-hour-chip">' + (h < 10 ? '0' : '') + h + ':00 \u2022 ' + Math.round(summary.hourlyAvg[h]) + '</span>';
+            html += '<span class="detail-hour-chip">' + (h < 10 ? '0' : '') + h + ':00 \u2022 ' + Math.round(summary.hourlyAvg[h]) + ' BPM</span>';
           }
         }
         html += '</div>';
@@ -2881,12 +2908,12 @@ export class HeartRateManager {
       // 健康数据
       if (health) {
         var healthRows = [];
-        if (health.calories != null) healthRows.push('<div class="detail-stat-row"><span class="detail-stat-label">\ud83d\udd25 \u5361\u8def\u91cc</span><span class="detail-stat-value">' + health.calories + ' kcal</span></div>');
-        if (health.stepCount != null) healthRows.push('<div class="detail-stat-row"><span class="detail-stat-label">\ud83d\udc5f \u6b65\u6570</span><span class="detail-stat-value">' + health.stepCount + '</span></div>');
-        if (health.bloodOxygen != null) healthRows.push('<div class="detail-stat-row"><span class="detail-stat-label">\ud83e\ude78 \u8840\u6c27</span><span class="detail-stat-value">' + health.bloodOxygen + '%</span></div>');
+        if (health.calories != null) healthRows.push('<div class="detail-stat-row"><span class="detail-stat-label">\ud83d\udd25 \u5361\u8def\u91cc</span><span class="detail-stat-value">' + Math.round(health.calories) + ' kcal</span></div>');
+        if (health.stepCount != null) healthRows.push('<div class="detail-stat-row"><span class="detail-stat-label">\ud83d\udc5f \u6b65\u6570</span><span class="detail-stat-value">' + Math.round(health.stepCount) + '</span></div>');
+        if (health.bloodOxygen != null) healthRows.push('<div class="detail-stat-row"><span class="detail-stat-label">\ud83e\ude78 \u8840\u6c27</span><span class="detail-stat-value">' + Number(health.bloodOxygen).toFixed(1) + '%</span></div>');
         if (health.distance != null) healthRows.push('<div class="detail-stat-row"><span class="detail-stat-label">\ud83d\udccf \u8ddd\u79bb</span><span class="detail-stat-value">' + (health.distance >= 1000 ? (health.distance / 1000).toFixed(2) + ' km' : health.distance.toFixed(0) + ' m') + '</span></div>');
         if (health.speed != null) healthRows.push('<div class="detail-stat-row"><span class="detail-stat-label">\u26a1 \u901f\u5ea6</span><span class="detail-stat-value">' + (health.speed * 3.6).toFixed(1) + ' km/h</span></div>');
-        if (health.bodyMass != null) healthRows.push('<div class="detail-stat-row"><span class="detail-stat-label">\u2696\ufe0f \u4f53\u91cd</span><span class="detail-stat-value">' + health.bodyMass + ' kg</span></div>');
+        if (health.bodyMass != null) healthRows.push('<div class="detail-stat-row"><span class="detail-stat-label">\u2696\ufe0f \u4f53\u91cd</span><span class="detail-stat-value">' + Number(health.bodyMass).toFixed(1) + ' kg</span></div>');
         if (health.bmi != null) healthRows.push('<div class="detail-stat-row"><span class="detail-stat-label">\ud83d\udcd0 BMI</span><span class="detail-stat-value">' + health.bmi.toFixed(1) + '</span></div>');
         if (healthRows.length > 0) {
           parts.push('<div class="detail-section-label">\ud83d\udc8a \u5065\u5eb7\u6570\u636e</div>' + healthRows.join(''));

@@ -108,14 +108,27 @@ export class DataStore {
   }
 
   /**
+   * 获取今日实时摘要（已规范化区间分布为百分比）
+   * 用于需要最新数据的场景（如日详情面板），避免读取可能过时的持久化数据
+   */
+  getLiveSummary(): DailySummary | null {
+    if (this.currentSummary.samples === 0) { return null; }
+    return this.normalizeZoneDistribution(this.currentSummary);
+  }
+
+  /**
    * 获取多个日期的摘要（日历视图用）
    */
   getMultipleSummaries(dates: string[]): Record<string, DailySummary> {
     const result: Record<string, DailySummary> = {};
     for (const date of dates) {
-      const summary = date === this.currentDate
-        ? this.currentSummary
-        : this.getSummary(date);
+      let summary: DailySummary | null;
+      if (date === this.currentDate) {
+        // 今天：返回规范化后的实时数据（百分比而非原始计数）
+        summary = this.getLiveSummary();
+      } else {
+        summary = this.getSummary(date);
+      }
       if (summary) {
         result[date] = summary;
       }
@@ -185,8 +198,21 @@ export class DataStore {
     const copy = { ...summary };
     if (copy.samples > 0) {
       const dist: Record<string, number> = {};
+      // 第一遍：计算精确百分比并取整（保留两位小数）
+      const entries: [string, number][] = [];
       for (const [zone, count] of Object.entries(copy.zoneDistribution)) {
-        dist[zone] = Math.round((count as number / copy.samples) * 10000) / 100; // 保留两位小数
+        const exact = (count as number / copy.samples) * 100;
+        const rounded = Math.round(exact * 100) / 100; // 保留两位小数
+        dist[zone] = rounded;
+        entries.push([zone, exact - rounded]); // 保存余数
+      }
+      // 第二遍：最大余额法修正，确保总和为 100%
+      const total = Object.values(dist).reduce((a, b) => a + b, 0);
+      const diff = Math.round((100 - total) * 100) / 100;
+      if (diff !== 0 && entries.length > 0) {
+        // 按余数降序排序，将差值分配给余数最大的区间
+        entries.sort((a, b) => b[1] - a[1]);
+        dist[entries[0][0]] = Math.round((dist[entries[0][0]] + diff) * 100) / 100;
       }
       copy.zoneDistribution = dist;
     }
