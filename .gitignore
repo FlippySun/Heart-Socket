@@ -38,6 +38,7 @@ CLAUDE.md
 .repomix/
 .github/agents/
 .github/prompts/
+.github/copilot-instructions.md
 .github/skills/
 .github/settings.local.json
 

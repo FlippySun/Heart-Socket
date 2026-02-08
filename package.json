@@ -5,11 +5,26 @@
   "version": "0.1.0",
   "publisher": "flippysun",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/FlippySun/Heart-Socket"
+  },
+  "homepage": "https://github.com/FlippySun/Heart-Socket#readme",
+  "bugs": {
+    "url": "https://github.com/FlippySun/Heart-Socket/issues"
+  },
+  "galleryBanner": {
+    "color": "#1e1e2e",
+    "theme": "dark"
+  },
+  "markdown": "github",
+  "qna": "false",
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": [
-    "Other"
+    "Other",
+    "Visualization"
   ],
   "keywords": [
     "heart rate",
@@ -17,7 +32,12 @@
     "health",
     "monitor",
     "websocket",
-    "bpm"
+    "bpm",
+    "heart rate monitor",
+    "fitness",
+    "coding health",
+    "pulsoid",
+    "hyperate"
   ],
   "activationEvents": [
     "onStartupFinished"

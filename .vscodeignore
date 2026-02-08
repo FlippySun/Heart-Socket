@@ -18,6 +18,11 @@ tsconfig.json
 esbuild.js
 start-vscode.sh
 CLAUDE.md
+test-mock-server.js
+validate-js.js
+heart.log
+heart2.log
+*.vsix
 **/*.map
 **/*.ts
 !dist/**
