@@ -3,7 +3,7 @@
   "displayName": "Heart Socket - Apple Watch Heart Rate Monitor",
   "description": "Real-time Apple Watch heart rate display in VS Code status bar. Supports HDS, HypeRate, Pulsoid, and custom WebSocket sources.",
   "version": "0.1.0",
-  "publisher": "flippysun",
+  "publisher": "FlippySun",
   "license": "MIT",
   "repository": {
     "type": "git",

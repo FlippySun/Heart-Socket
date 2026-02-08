@@ -23,6 +23,8 @@ validate-js.js
 heart.log
 heart2.log
 *.vsix
+.opsdev-token.json
 **/*.map
+dist/**/*.map
 **/*.ts
 !dist/**
