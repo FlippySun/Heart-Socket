@@ -41,6 +41,7 @@ CLAUDE.md
 .github/copilot-instructions.md
 .github/skills/
 .github/settings.local.json
+.opsdev-token.json
 
 # Old project config (local only)
 .cnb.yml
