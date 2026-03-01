@@ -2,6 +2,20 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.3] - 2025-07-24
+
+### 🐛 Bug 修复
+- **修复 `handleHttpError()` 属性名错误** — `this.config.dataSource` 改为 `this.config.provider`，修复了 HTTP 错误处理函数完全无法工作的严重 bug
+
+### 🛡️ 防御性改进
+- **WebSocket 断开重连状态重置** — `disconnect()` 时重置 `_nonRetryable` 标志，避免手动重连时因残留状态阻止重试
+- **异步回调安全防护** — `unexpected-response` 处理器增加 `isDisposed` 检查，防止组件销毁后仍执行异步逻辑
+- **响应体读取超时保护** — 为 HTTP 响应体读取增加 5 秒超时，防止服务器持续发送数据导致无限挂起
+- **精确事件监听器清理** — `closeSocket()` 改用逐事件移除替代 `removeAllListeners()`，避免影响 ws 库内部侦听器
+
+### 🆕 新增
+- **`WebSocketError` 类型定义** — 新增结构化 WebSocket 错误类型，包含 `httpStatus`、`responseBody`、`nonRetryable`、`userMessage` 属性
+
 ## [0.1.0] - 2026-02-08
 
 ### 🎉 首次发布
@@ -36,4 +50,5 @@
 - **网络变化检测** — WiFi / IP 变化时自动弹窗提醒更新 Watch 地址
 - **端口冲突处理** — 端口被占用时自动提示并引导配置
 
+[0.1.3]: https://github.com/FlippySun/Heart-Socket/releases/tag/v0.1.3
 [0.1.0]: https://github.com/FlippySun/Heart-Socket/releases/tag/v0.1.0

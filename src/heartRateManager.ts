@@ -19,7 +19,7 @@ import { HypeRateProvider } from './providers/hyperateProvider';
 import { PulsoidProvider } from './providers/pulsoidProvider';
 import { CustomProvider } from './providers/customProvider';
 import { DataStore } from './dataStore';
-import { ConnectionStatus } from './types';
+import { ConnectionStatus, WebSocketError } from './types';
 import type {
   HeartRateData,
   HealthData,
@@ -777,6 +777,12 @@ export class HeartRateManager {
     provider.on('error', (error: Error) => {
       this.log(`错误: ${error.message}`);
 
+      // HTTP 状态码错误（如 401/402/403）：友好弹框提示用户
+      if (error instanceof WebSocketError) {
+        this.handleHttpError(error);
+        return;
+      }
+
       // 端口占用时给出友好提示
       if (error.message.includes('EADDRINUSE')) {
         vscode.window.showErrorMessage(
@@ -793,6 +799,52 @@ export class HeartRateManager {
     provider.on('log', (msg: string) => {
       this.log(msg);
     });
+  }
+
+  /**
+   * 处理 WebSocket HTTP 错误，向用户展示友好的弹框提示
+   *
+   * 不可重试的错误（4xx）会停止自动重连并引导用户修复配置；
+   * 可重试的错误（429/5xx）仅显示信息提示，后台继续重连。
+   */
+  private handleHttpError(error: WebSocketError): void {
+    const providerLabel = this.config.provider.toUpperCase();
+    const prefix = `Heart Socket [${providerLabel}]`;
+
+    if (error.nonRetryable) {
+      // 不可重试：弹 Error 级别提示 + 操作按钮
+      const buttons: string[] = ['打开设置'];
+
+      // 402 特殊处理：引导用户了解订阅信息
+      if (error.httpStatus === 402) {
+        buttons.push('了解更多');
+      }
+
+      vscode.window.showErrorMessage(
+        `${prefix}: ${error.userMessage}`,
+        ...buttons
+      ).then(action => {
+        if (action === '打开设置') {
+          vscode.commands.executeCommand(
+            'workbench.action.openSettings',
+            'heartSocket'
+          );
+        } else if (action === '了解更多') {
+          // 根据数据源打开对应的订阅/价格页面
+          const urls: Record<string, string> = {
+            pulsoid: 'https://pulsoid.net/pricing',
+            hyperate: 'https://www.hyperate.io/pricing',
+          };
+          const url = urls[this.config.provider] ?? 'https://github.com';
+          vscode.env.openExternal(vscode.Uri.parse(url));
+        }
+      });
+    } else {
+      // 可重试（429/5xx）：仅信息提示，不阻塞重连
+      vscode.window.showWarningMessage(
+        `${prefix}: ${error.userMessage}`
+      );
+    }
   }
 
   /**

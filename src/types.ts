@@ -280,3 +280,37 @@ export interface DailySummary {
   /** 每小时 BPM 累计和（用于增量计算） */
   hourlyBpmSum: number[];
 }
+
+// ─── WebSocket HTTP 错误 ──────────────────────────
+
+/**
+ * WebSocket 连接时服务器返回非 101 HTTP 状态码的错误
+ *
+ * 用于在 UI 层向用户展示具体的连接失败原因，
+ * 并控制是否继续自动重连。
+ */
+export class WebSocketError extends Error {
+  /** HTTP 状态码（401/402/403/404 等） */
+  readonly httpStatus: number;
+  /** 服务器返回的原始响应体（可能包含更具体的错误信息） */
+  readonly responseBody: string;
+  /** 是否为不可重试错误（4xx 除 429 为不可重试） */
+  readonly nonRetryable: boolean;
+  /** 面向用户的友好提示文案 */
+  readonly userMessage: string;
+
+  constructor(params: {
+    httpStatus: number;
+    responseBody?: string;
+    nonRetryable: boolean;
+    userMessage: string;
+    message?: string;
+  }) {
+    super(params.message ?? `HTTP ${params.httpStatus}: ${params.userMessage}`);
+    this.name = 'WebSocketError';
+    this.httpStatus = params.httpStatus;
+    this.responseBody = params.responseBody ?? '';
+    this.nonRetryable = params.nonRetryable;
+    this.userMessage = params.userMessage;
+  }
+}

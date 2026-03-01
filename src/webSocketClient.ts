@@ -9,7 +9,8 @@
  */
 import { EventEmitter } from 'events';
 import WebSocket from 'ws';
-import { ConnectionStatus } from './types';
+import type { IncomingMessage } from 'http';
+import { ConnectionStatus, WebSocketError } from './types';
 import type { ReconnectConfig } from './types';
 
 /** 默认重连配置 */
@@ -39,6 +40,8 @@ export class WebSocketClient extends EventEmitter {
   private _status: ConnectionStatus = ConnectionStatus.Disconnected;
   private isManualClose: boolean = false;
   private isDisposed: boolean = false;
+  /** 标记当前错误是否不可重试（如 HTTP 4xx），阻止自动重连 */
+  private _nonRetryable: boolean = false;
 
   constructor(reconnectConfig?: Partial<ReconnectConfig>) {
     super();
@@ -65,6 +68,7 @@ export class WebSocketClient extends EventEmitter {
 
     this.url = url;
     this.isManualClose = false;
+    this._nonRetryable = false;
     this.reconnectAttempt = 0;
     this.doConnect();
   }
@@ -74,6 +78,7 @@ export class WebSocketClient extends EventEmitter {
    */
   disconnect(): void {
     this.isManualClose = true;
+    this._nonRetryable = false;
     this.clearTimers();
     this.closeSocket();
     this.setStatus(ConnectionStatus.Disconnected);
@@ -129,7 +134,7 @@ export class WebSocketClient extends EventEmitter {
         this.stopPing();
         this.emit('close', code, reasonStr);
 
-        if (!this.isManualClose && !this.isDisposed) {
+        if (!this.isManualClose && !this.isDisposed && !this._nonRetryable) {
           this.scheduleReconnect();
         }
       });
@@ -137,6 +142,42 @@ export class WebSocketClient extends EventEmitter {
       this.ws.on('error', (error: Error) => {
         this.emit('error', error);
         // WebSocket 错误后通常会触发 close 事件，由 close 处理重连
+      });
+
+      // 拦截 HTTP 非 101 响应（如 401/402/403），提取状态码和响应体
+      this.ws.on('unexpected-response', (_req: unknown, res: IncomingMessage) => {
+        const statusCode = res.statusCode ?? 0;
+        const chunks: Buffer[] = [];
+        let handled = false;
+
+        const processResponse = () => {
+          if (handled) return;
+          handled = true;
+          if (this.isDisposed) return;
+
+          const body = Buffer.concat(chunks).toString('utf-8');
+          const wsError = this.createHttpError(statusCode, body);
+          this.emit('error', wsError);
+
+          if (wsError.nonRetryable) {
+            this._nonRetryable = true;
+            this.setStatus(ConnectionStatus.Error);
+            this.closeSocket();
+          } else {
+            // 可重试错误（429/5xx）：关闭后走正常重连
+            this.closeSocket();
+            this.scheduleReconnect();
+          }
+        };
+
+        // 5 秒超时兜底：防止响应体永远不结束
+        const bodyTimeout = setTimeout(processResponse, 5000);
+
+        res.on('data', (chunk: Buffer) => chunks.push(chunk));
+        res.on('end', () => {
+          clearTimeout(bodyTimeout);
+          processResponse();
+        });
       });
 
       this.ws.on('pong', () => {
@@ -204,7 +245,13 @@ export class WebSocketClient extends EventEmitter {
   private closeSocket(): void {
     if (this.ws) {
       try {
-        this.ws.removeAllListeners();
+        // 逐事件移除，避免影响 ws 库内部可能的监听器
+        this.ws.removeAllListeners('open');
+        this.ws.removeAllListeners('message');
+        this.ws.removeAllListeners('close');
+        this.ws.removeAllListeners('error');
+        this.ws.removeAllListeners('unexpected-response');
+        this.ws.removeAllListeners('pong');
         if (
           this.ws.readyState === WebSocket.OPEN ||
           this.ws.readyState === WebSocket.CONNECTING
@@ -231,5 +278,47 @@ export class WebSocketClient extends EventEmitter {
       this._status = status;
       this.emit('statusChange', status);
     }
+  }
+
+  /**
+   * 根据 HTTP 状态码和响应体构造 WebSocketError
+   * - 4xx（除 429）：不可重试，用户需要手动修复（如更换 Token、升级订阅）
+   * - 429 / 5xx：可重试，自动重连
+   */
+  private createHttpError(statusCode: number, body: string): WebSocketError {
+    const is4xx = statusCode >= 400 && statusCode < 500;
+    const nonRetryable = is4xx && statusCode !== 429;
+
+    let userMessage: string;
+    switch (statusCode) {
+      case 401:
+        userMessage = '认证失败：Token 无效或已过期，请检查配置';
+        break;
+      case 402:
+        userMessage = '需要付费订阅才能使用实时心率 API';
+        break;
+      case 403:
+        userMessage = '访问被拒绝：Token 权限不足';
+        break;
+      case 404:
+        userMessage = 'API 地址不存在，请检查配置或数据源是否正确';
+        break;
+      case 429:
+        userMessage = '请求过于频繁，稍后将自动重试';
+        break;
+      default:
+        if (statusCode >= 500) {
+          userMessage = `服务器暂时不可用 (HTTP ${statusCode})，正在自动重试…`;
+        } else {
+          userMessage = `连接被拒绝 (HTTP ${statusCode})`;
+        }
+    }
+
+    return new WebSocketError({
+      httpStatus: statusCode,
+      responseBody: body,
+      nonRetryable,
+      userMessage,
+    });
   }
 }
